@@ -77,6 +77,34 @@ def test_draft_patch_preserves_numeric_age_with_its_unit(
     }
 
 
+def test_setting_age_text_takes_precedence_over_clearing_an_old_age_representation() -> None:
+    patch = BookingDraftPatch.model_validate(
+        {
+            "expected_version": 2,
+            "pet_age_text": "四个月",
+            "clear_fields": ["pet_age_years"],
+        }
+    )
+
+    assert patch.changes() == {
+        "pet_age_text": "四个月",
+        "pet_age_months": 4,
+        "pet_age_years": None,
+    }
+
+
+def test_clearing_one_age_representation_clears_the_logical_age() -> None:
+    patch = BookingDraftPatch.model_validate(
+        {"expected_version": 2, "clear_fields": ["pet_age_years"]}
+    )
+
+    assert patch.changes() == {
+        "pet_age_text": None,
+        "pet_age_months": None,
+        "pet_age_years": None,
+    }
+
+
 def test_draft_patch_accepts_breed_word_when_user_explicitly_uses_it_as_name() -> None:
     patch = BookingDraftPatch.model_validate(
         {"expected_version": 0, "pet_name": "金毛", "pet_species": "狗狗"}

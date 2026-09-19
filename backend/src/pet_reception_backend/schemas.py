@@ -243,6 +243,10 @@ DRAFT_MUTABLE_FIELDS: tuple[DraftFieldName, ...] = (
     "staff_id",
 )
 
+AGE_DRAFT_FIELDS = frozenset(
+    {"pet_age_years", "pet_age_months", "pet_age_text"}
+)
+
 
 class BookingDraftPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -332,7 +336,7 @@ class BookingDraftPatch(BaseModel):
             raise ValueError(f"fields cannot be set and cleared together: {fields}")
         if not provided and not self.clear_fields:
             raise ValueError("at least one draft field must be set or cleared")
-        age_inputs = provided.intersection({"pet_age_years", "pet_age_months", "pet_age_text"})
+        age_inputs = provided.intersection(AGE_DRAFT_FIELDS)
         if len(age_inputs) > 1:
             raise ValueError("provide pet age through only one age representation")
         return self
@@ -352,7 +356,9 @@ class BookingDraftPatch(BaseModel):
             changes.update(pet_age_text=None, pet_age_years=None)
         elif "pet_age_years" in provided:
             changes.update(pet_age_text=None, pet_age_months=None)
-        if self.clear_fields.intersection({"pet_age_years", "pet_age_months", "pet_age_text"}):
+        if not provided.intersection(AGE_DRAFT_FIELDS) and self.clear_fields.intersection(
+            AGE_DRAFT_FIELDS
+        ):
             changes.update(pet_age_text=None, pet_age_months=None, pet_age_years=None)
         return changes
 

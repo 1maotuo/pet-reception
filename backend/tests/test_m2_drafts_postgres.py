@@ -210,6 +210,47 @@ def test_draft_batch_update_correction_clear_and_same_value(
     }
 
 
+def test_age_set_with_old_representation_clear_keeps_the_new_age(
+    client: TestClient,
+) -> None:
+    trusted_headers = headers()
+    initial = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=trusted_headers,
+        json={"expected_version": 0, "pet_age_years": 6},
+    )
+    assert initial.status_code == 200, initial.text
+
+    updated = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=trusted_headers,
+        json={
+            "expected_version": 1,
+            "pet_age_text": "四个月",
+            "clear_fields": ["pet_age_years"],
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    draft = updated.json()["draft"]
+    assert draft["pet_age_text"] == "四个月"
+    assert draft["pet_age_months"] == 4
+    assert draft["pet_age_years"] is None
+
+    cleared = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=trusted_headers,
+        json={
+            "expected_version": draft["version"],
+            "clear_fields": ["pet_age_months"],
+        },
+    )
+    assert cleared.status_code == 200, cleared.text
+    cleared_draft = cleared.json()["draft"]
+    assert cleared_draft["pet_age_text"] is None
+    assert cleared_draft["pet_age_months"] is None
+    assert cleared_draft["pet_age_years"] is None
+
+
 def test_draft_rejects_implicit_null_and_unknown_service(client: TestClient) -> None:
     trusted_headers = headers()
 
