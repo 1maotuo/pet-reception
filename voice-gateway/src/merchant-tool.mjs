@@ -539,7 +539,7 @@ function periodAdjustedHour(period, rawHour) {
 
 function timeMentionRole(source, index) {
   const before = source.slice(Math.max(0, index - 10), index).replace(/\s/g, '')
-  return /(?:结束时间?|截止时间?|截至|到)$/.test(before) ? 'end' : 'start'
+  return /(?:结束时间?|截止时间?|截至|到|至)$/.test(before) ? 'end' : 'start'
 }
 
 function mentionedTimes(value) {
