@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pet-reception-backend"
 version = "0.1.0"
-description = "M0/M1 backend for the pet reception voice frontend"
+description = "Backend for the pet reception voice frontend"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi==0.141.1",
@@ -28,5 +28,5 @@ where = ["src"]
 addopts = "-q"
 testpaths = ["tests"]
 markers = [
-  "postgres: requires the explicitly configured PostgreSQL development database",
+  "postgres: requires the independent PostgreSQL test database",
 ]

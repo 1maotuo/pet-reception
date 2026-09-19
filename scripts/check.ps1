@@ -7,10 +7,22 @@ if (-not (Test-Path -LiteralPath $python)) {
     throw 'backend/.venv is missing; follow README.md first-install steps'
 }
 
-$nodeVersion = node --version
-if ($nodeVersion -ne 'v24.15.0') {
-    throw "Node v24.15.0 is required; found $nodeVersion"
+$requiredNodeVersion = 'v24.15.0'
+$portableNode = Join-Path (Split-Path -Parent $projectRoot) 'work\runtimes\node-v24.15.0-win-x64\node.exe'
+$nodeSources = @(
+    (Get-Command node -All -ErrorAction SilentlyContinue | ForEach-Object Source)
+    $portableNode
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
+$nodeSource = $nodeSources |
+    Where-Object { (& $_ --version) -eq $requiredNodeVersion } |
+    Select-Object -First 1
+if ($null -eq $nodeSource) {
+    $foundVersions = $nodeSources |
+        ForEach-Object { & $_ --version } |
+        Sort-Object -Unique
+    throw "Node $requiredNodeVersion is required; found $($foundVersions -join ', ')"
 }
+$env:Path = "$(Split-Path -Parent $nodeSource);$env:Path"
 
 Push-Location (Join-Path $projectRoot 'backend')
 try {
@@ -36,4 +48,4 @@ finally {
     Pop-Location
 }
 
-Write-Output 'All deterministic M0/M1 checks passed.'
+Write-Output 'All database-independent M0/M1/M2-1 checks passed.'

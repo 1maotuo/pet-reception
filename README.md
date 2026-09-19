@@ -1,18 +1,19 @@
 # Pet Reception
 
-面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库完成到 M0/M1：可运行工程、真实状态页、Qwen Audio Agent 薄接入和一个只读演示商家 HTTP 工具。正式预约、空档查询和写入尚未实现。
+面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库完成到 M2-1：在已验收的 M0/M1 工程与语音接缝之上，加入 PostgreSQL 商家目录和会话预约草稿。空档查询、正式预约和写入仍未实现。
 
 ## 当前组件
 
 - `web/`：React 19 + TypeScript 7 + Vite 8 状态页。
-- `backend/`：FastAPI 后端，提供健康检查、PostgreSQL 连接检查和受保护的演示商家资料接口。
+- `backend/`：FastAPI 后端，提供健康检查、PostgreSQL 连接检查、持久化演示商家目录和受保护的会话预约草稿接口。
 - `voice-gateway/`：固定 `qwen-audio-agent@1.11.0`，复用其 WebUI、实时音频、播放、打断和重连机制；注入确定性的商家 HTTP 协调器，并通过版本守卫补丁配置同一套服务端 VAD、逻辑会话问候去重和 M1 工具许可集合。
 - `config/demo-merchant.json`：当前演示商家、前台角色、场景安全分流和能力开关的受信配置；后端和语音网关读取同一份商家来源。
 - `compose.yaml`：绑定本机回环地址的 PostgreSQL 17.11 开发服务。
+- `scripts/check-m2.ps1`：先跑全量数据库外回归，再在独立的 `*_test` PostgreSQL 数据库运行持久化测试。
 
 ## 运行条件
 
-- Node.js `24.15.0`。Qwen Audio Agent 1.11.0 要求 `^22.22.2 || ^24.15.0 || >=26.0.0`；项目按已验证的 24.15.0 固定。
+- Node.js `24.15.0` 与 npm `11.12.1`。Qwen Audio Agent 1.11.0 要求 `^22.22.2 || ^24.15.0 || >=26.0.0`；项目按已验证的 24.15.0 固定。
 - Python `3.12.x`。
 - Docker Desktop，用于开发 PostgreSQL。
 - 真实语音需要百炼 `DASHSCOPE_API_KEY`、浏览器麦克风权限和可用音频设备。
@@ -46,7 +47,7 @@ backend\.venv\Scripts\python.exe -m pip install -e backend --no-deps
 
 `npm ci` 会运行 `scripts/apply-qwen-m1-patch.mjs`。该脚本只接受锁定的 Qwen Audio Agent 1.11.0；版本不匹配会停止安装，避免对未知上游静默打补丁。
 
-需要替换演示商家时，在本地 `.env` 同时设置匹配的 `DEMO_MERCHANT_ID` 和 `MERCHANT_CONFIG_PATH`。FastAPI 与语音网关会读取同一个文件；文件内 ID 与环境变量不一致时启动失败，不会静默形成两套商家事实。
+需要替换演示商家时，在本地 `.env` 同时设置匹配的 `DEMO_MERCHANT_ID` 和 `MERCHANT_CONFIG_PATH`，随后再次执行 `python -m pet_reception_backend.manage setup` 将配置 seed 到开发库。语音网关读取该受信文件，FastAPI 从 seed 后的 PostgreSQL 读取公开事实；文件内 ID 与环境变量不一致时启动失败，不会静默绑定到另一家商户。
 
 ## 启动
 
@@ -56,6 +57,14 @@ backend\.venv\Scripts\python.exe -m pip install -e backend --no-deps
 docker compose up -d db
 docker compose ps
 ```
+
+首次启动或数据库结构变化后，执行迁移并写入明确标注的演示商家：
+
+```powershell
+backend\.venv\Scripts\python.exe -m pet_reception_backend.manage setup
+```
+
+该命令可重复执行；不会删除草稿或重建数据库。后端不会在请求过程中偷偷创建业务表，未迁移时会如实失败。
 
 分别打开三个终端，在仓库根目录运行：
 
@@ -86,16 +95,10 @@ npm run dev:voice
 .\scripts\check.ps1
 ```
 
-数据库运行后增加真实 PostgreSQL 检查：
+数据库运行后运行完整 M2-1 检查。脚本只创建/使用数据库名以 `_test` 结尾的独立测试库，不清空开发库：
 
 ```powershell
-$env:RUN_POSTGRES_TESTS = '1'
-$env:DATABASE_URL = 'postgresql+psycopg://pet_reception:pet_reception_dev@127.0.0.1:5432/pet_reception'
-Push-Location backend
-.\.venv\Scripts\python.exe -m pytest -m postgres
-Pop-Location
-Remove-Item Env:RUN_POSTGRES_TESTS
-Remove-Item Env:DATABASE_URL
+.\scripts\check-m2.ps1
 ```
 
 检查 HTTP 状态：
@@ -110,6 +113,36 @@ Invoke-RestMethod http://127.0.0.1:3101/api/health
 ```powershell
 npm run probe:tool --workspace @pet-reception/voice-gateway
 ```
+
+## M2-1 草稿 API
+
+受保护入口为：
+
+- `GET /api/internal/voice/merchant-info`：从 PostgreSQL 读取当前绑定商家和服务。
+- `GET /api/internal/voice/booking-draft`：按受信 `merchant + owner + voice session` 获取或创建一个草稿。
+- `PATCH /api/internal/voice/booking-draft`：批量更新、纠正或显式清空字段；必须携带当前 `expected_version`。
+
+PATCH 只接受业务字段。`merchant_id`、`owner_id`、`voice_session_id`、来电号码和电话来源不能由模型在请求正文指定。未提供字段保持不变；显式 JSON `null` 不等于清空，清空必须列入 `clear_fields`；写入同值不会增加版本。未知服务返回 422，旧版本返回 409。
+
+响应分别返回 `missing_for_availability` 与 `missing_for_booking`。前者当前只要求真实服务与日期；后者还要求客户、电话、宠物信息，并始终缺少 M2-2 才会产生的 `selected_availability`。因此 M2-1 不会误称已能查空档或预约成功。
+
+可在 FastAPI 文档中查看契约，也可直接运行真实 PostgreSQL 行为测试：
+
+```powershell
+$env:RUN_POSTGRES_TESTS = '1'
+Push-Location backend
+.\.venv\Scripts\python.exe -m pytest tests\test_m2_drafts_postgres.py
+Pop-Location
+Remove-Item Env:RUN_POSTGRES_TESTS
+```
+
+后端正在运行时，可执行一次独立 session 的开发库 HTTP 演示（只写带 `m2_probe_` 标识的演示草稿，不打印服务令牌）：
+
+```powershell
+.\scripts\probe-m2-draft.ps1
+```
+
+当前 Qwen Session 仍只开放 M1 的只读商家资料工具。草稿业务入口已经可独立验收，但要到 M4 才接入实时模型；这样不会在 M2-2 空档和 M3 可信确认尚未完成时，让模型假装已经预约。
 
 ## M1 真人语音检查
 

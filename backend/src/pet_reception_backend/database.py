@@ -12,7 +12,7 @@ class DatabaseProbe:
     connect_timeout_seconds: int = 2
     _engine: Engine | None = None
 
-    def _get_engine(self) -> Engine:
+    def get_engine(self) -> Engine:
         if self._engine is None:
             self._engine = create_engine(
                 self.database_url,
@@ -28,7 +28,7 @@ class DatabaseProbe:
                 detail="DATABASE_URL 未配置",
             )
         try:
-            with self._get_engine().connect() as connection:
+            with self.get_engine().connect() as connection:
                 connection.execute(text("SELECT 1"))
             return DatabaseStatus(status="connected", detail="PostgreSQL 连接正常")
         except Exception as error:  # The public response deliberately omits DSN details.

@@ -6,7 +6,8 @@ import pytest
 
 from pet_reception_backend.app import create_app
 from pet_reception_backend.config import Settings
-from pet_reception_backend.schemas import DatabaseStatus
+from pet_reception_backend.merchant_catalog import load_demo_merchant
+from pet_reception_backend.schemas import DatabaseStatus, DemoMerchant
 
 
 class StubProbe:
@@ -21,12 +22,30 @@ class StubProbe:
         self.closed = True
 
 
+class StubStore:
+    def __init__(self, merchant: DemoMerchant) -> None:
+        self.merchant = merchant
+
+    def get_merchant(self, merchant_id: str) -> DemoMerchant | None:
+        return self.merchant if merchant_id == self.merchant.id else None
+
+    def get_or_create_draft(self, _context):
+        raise NotImplementedError
+
+    def update_draft(self, _context, _expected_version, _changes):
+        raise NotImplementedError
+
+
 def settings() -> Settings:
     return Settings(
         database_url="",
         voice_gateway_service_token="test-service-token",
         demo_merchant_id="demo-grooming-001",
     )
+
+
+def default_store() -> StubStore:
+    return StubStore(load_demo_merchant())
 
 
 def write_merchant(path: Path, merchant_id: str, display_name: str) -> None:
@@ -57,7 +76,7 @@ def write_merchant(path: Path, merchant_id: str, display_name: str) -> None:
 
 def test_health_reports_real_database_state() -> None:
     probe = StubProbe(DatabaseStatus(status="unavailable", detail="test database offline"))
-    with TestClient(create_app(settings(), probe)) as client:
+    with TestClient(create_app(settings(), probe, default_store())) as client:
         response = client.get("/health")
 
     assert response.status_code == 200
@@ -74,7 +93,7 @@ def test_health_reports_real_database_state() -> None:
 
 def test_readiness_is_unavailable_without_database() -> None:
     probe = StubProbe(DatabaseStatus(status="not_configured", detail="DATABASE_URL 未配置"))
-    with TestClient(create_app(settings(), probe)) as client:
+    with TestClient(create_app(settings(), probe, default_store())) as client:
         response = client.get("/readyz")
 
     assert response.status_code == 503
@@ -83,7 +102,7 @@ def test_readiness_is_unavailable_without_database() -> None:
 
 def test_voice_tool_rejects_untrusted_callers() -> None:
     probe = StubProbe(DatabaseStatus(status="connected", detail="ok"))
-    with TestClient(create_app(settings(), probe)) as client:
+    with TestClient(create_app(settings(), probe, default_store())) as client:
         response = client.get(
             "/api/internal/voice/merchant-info",
             headers={
@@ -97,9 +116,25 @@ def test_voice_tool_rejects_untrusted_callers() -> None:
     assert response.status_code == 401
 
 
+def test_booking_draft_rejects_untrusted_callers_before_store_access() -> None:
+    probe = StubProbe(DatabaseStatus(status="connected", detail="ok"))
+    with TestClient(create_app(settings(), probe, default_store())) as client:
+        response = client.get(
+            "/api/internal/voice/booking-draft",
+            headers={
+                "X-Voice-Owner-ID": "user_test",
+                "X-Voice-Session-ID": "session-a",
+                "X-Voice-Turn-ID": "turn-a",
+                "X-Merchant-ID": "demo-grooming-001",
+            },
+        )
+
+    assert response.status_code == 401
+
+
 def test_voice_tool_uses_gateway_bound_context() -> None:
     probe = StubProbe(DatabaseStatus(status="connected", detail="ok"))
-    with TestClient(create_app(settings(), probe)) as client:
+    with TestClient(create_app(settings(), probe, default_store())) as client:
         response = client.get(
             "/api/internal/voice/merchant-info",
             headers={
@@ -127,7 +162,7 @@ def test_voice_tool_uses_gateway_bound_context() -> None:
 
 def test_voice_tool_rejects_a_different_merchant_binding() -> None:
     probe = StubProbe(DatabaseStatus(status="connected", detail="ok"))
-    with TestClient(create_app(settings(), probe)) as client:
+    with TestClient(create_app(settings(), probe, default_store())) as client:
         response = client.get(
             "/api/internal/voice/merchant-info",
             headers={
@@ -142,7 +177,7 @@ def test_voice_tool_rejects_a_different_merchant_binding() -> None:
     assert response.status_code == 403
 
 
-def test_voice_tool_loads_the_configured_merchant_file(tmp_path: Path) -> None:
+def test_voice_tool_uses_a_store_matching_the_configured_merchant(tmp_path: Path) -> None:
     merchant_path = tmp_path / "merchant-b.json"
     write_merchant(merchant_path, "review-grooming-002", "Review Grooming B")
     configured = Settings(
@@ -153,7 +188,9 @@ def test_voice_tool_loads_the_configured_merchant_file(tmp_path: Path) -> None:
     )
     probe = StubProbe(DatabaseStatus(status="connected", detail="ok"))
 
-    with TestClient(create_app(configured, probe)) as client:
+    with TestClient(
+        create_app(configured, probe, StubStore(load_demo_merchant(merchant_path)))
+    ) as client:
         response = client.get(
             "/api/internal/voice/merchant-info",
             headers={
@@ -169,7 +206,7 @@ def test_voice_tool_loads_the_configured_merchant_file(tmp_path: Path) -> None:
     assert response.json()["merchant"]["display_name"] == "Review Grooming B"
 
 
-def test_voice_tool_reloads_same_id_facts_from_configured_file(tmp_path: Path) -> None:
+def test_voice_tool_returns_current_store_facts_for_the_bound_id(tmp_path: Path) -> None:
     merchant_path = tmp_path / "merchant-updated.json"
     write_merchant(merchant_path, "demo-grooming-001", "Updated Demo Grooming")
     configured = Settings(
@@ -180,7 +217,9 @@ def test_voice_tool_reloads_same_id_facts_from_configured_file(tmp_path: Path) -
     )
     probe = StubProbe(DatabaseStatus(status="connected", detail="ok"))
 
-    with TestClient(create_app(configured, probe)) as client:
+    with TestClient(
+        create_app(configured, probe, StubStore(load_demo_merchant(merchant_path)))
+    ) as client:
         response = client.get(
             "/api/internal/voice/merchant-info",
             headers={

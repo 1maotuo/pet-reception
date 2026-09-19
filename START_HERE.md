@@ -1,6 +1,6 @@
 # 交给 Codex 的使用方法与提示词
 
-本仓库已完成并验收 M0 工程准备与 M1 最小语音/只读商家工具接缝，尚未进入 M2。这里保留最初的执行提示，实际安装、启动和测试命令以根目录 `README.md` 为准；真实进度与证据以 `docs/PLAN.md`、`docs/evidence/M0_M1_2026-09-19.md` 和 `docs/evidence/M1_ACCEPTANCE_2026-09-19.md` 为准。
+本仓库已完成并验收 M0/M1；M2-1 商家与草稿已完成自动化实现，等待阶段验收，尚未进入 M2-2。这里保留最初的执行提示，实际安装、启动和测试命令以根目录 `README.md` 为准；真实进度与证据以 `docs/PLAN.md` 及 `docs/evidence/` 为准。
 
 ## 当前在哪里运行
 本文件已经位于目标 Git 仓库。请在仓库根目录按 `README.md` 启动 PostgreSQL、FastAPI、React 状态页和 Qwen 语音网关。

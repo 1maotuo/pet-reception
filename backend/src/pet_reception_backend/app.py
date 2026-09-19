@@ -8,12 +8,23 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import Settings, get_settings
 from .database import DatabaseProbe
-from .merchant_catalog import get_demo_merchant, load_demo_merchant
+from .merchant_catalog import load_demo_merchant
 from .schemas import (
+    BookingDraft,
+    BookingDraftPatch,
+    BookingDraftToolResult,
     DatabaseStatus,
+    DraftFieldName,
     MerchantToolResult,
     SystemStatus,
     VoiceRequestContext,
+)
+from .store import (
+    DataStore,
+    DraftVersionConflictError,
+    MerchantNotFoundError,
+    PostgresStore,
+    UnknownServiceError,
 )
 
 
@@ -29,6 +40,7 @@ bearer = HTTPBearer(auto_error=False)
 def create_app(
     settings: Settings | None = None,
     database_probe: Probe | None = None,
+    data_store: DataStore | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     configured_merchant = load_demo_merchant(resolved_settings.merchant_config_path)
@@ -40,6 +52,13 @@ def create_app(
         resolved_settings.database_url,
         resolved_settings.database_connect_timeout_seconds,
     )
+    store = data_store
+    if (
+        store is None
+        and isinstance(probe, DatabaseProbe)
+        and resolved_settings.database_url
+    ):
+        store = PostgresStore(probe.get_engine())
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -48,15 +67,22 @@ def create_app(
 
     application = FastAPI(
         title="Pet Reception Backend",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=[resolved_settings.web_origin],
         allow_credentials=True,
-        allow_methods=["GET"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_methods=["GET", "PATCH"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Merchant-ID",
+            "X-Voice-Owner-ID",
+            "X-Voice-Session-ID",
+            "X-Voice-Turn-ID",
+        ],
     )
 
     def current_status() -> SystemStatus:
@@ -81,17 +107,21 @@ def create_app(
     def system_status() -> SystemStatus:
         return current_status()
 
-    @application.get(
-        "/api/internal/voice/merchant-info",
-        response_model=MerchantToolResult,
-    )
-    def merchant_info(
+    def require_store() -> DataStore:
+        if store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL business store is not configured",
+            )
+        return store
+
+    def trusted_voice_context(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
         x_voice_owner_id: str = Header(min_length=6, max_length=128),
         x_voice_session_id: str = Header(min_length=1, max_length=128),
         x_voice_turn_id: str = Header(min_length=1, max_length=128),
         x_merchant_id: str = Header(min_length=1, max_length=128),
-    ) -> MerchantToolResult:
+    ) -> VoiceRequestContext:
         expected_token = resolved_settings.voice_gateway_service_token
         supplied_token = credentials.credentials if credentials else ""
         if (
@@ -102,18 +132,105 @@ def create_app(
             raise HTTPException(status_code=401, detail="voice gateway authentication failed")
         if x_merchant_id != resolved_settings.demo_merchant_id:
             raise HTTPException(status_code=403, detail="merchant is not bound to this gateway")
-        merchant = get_demo_merchant(configured_merchant, x_merchant_id)
+        return VoiceRequestContext(
+            merchant_id=x_merchant_id,
+            owner_id=x_voice_owner_id,
+            voice_session_id=x_voice_session_id,
+            turn_id=x_voice_turn_id,
+        )
+
+    def draft_result(
+        draft: BookingDraft,
+        context: VoiceRequestContext,
+        changed_fields: list[DraftFieldName] | None = None,
+    ) -> BookingDraftToolResult:
+        missing_for_availability = [
+            field
+            for field in ("service_id", "preferred_date")
+            if getattr(draft, field) is None
+        ]
+        missing_for_booking = [
+            field
+            for field in (
+                "customer_name",
+                "contact_phone",
+                "pet_name",
+                "pet_species",
+                "service_id",
+                "preferred_date",
+            )
+            if getattr(draft, field) is None
+        ]
+        missing_for_booking.append("selected_availability")
+        return BookingDraftToolResult(
+            draft=draft,
+            context=context,
+            changed_fields=changed_fields or [],
+            missing_for_availability=missing_for_availability,
+            missing_for_booking=missing_for_booking,
+        )
+
+    @application.get(
+        "/api/internal/voice/merchant-info",
+        response_model=MerchantToolResult,
+    )
+    def merchant_info(
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> MerchantToolResult:
+        merchant = current_store.get_merchant(context.merchant_id)
         if merchant is None:
             raise HTTPException(status_code=404, detail="merchant not found")
         return MerchantToolResult(
             merchant=merchant,
-            context=VoiceRequestContext(
-                merchant_id=merchant.id,
-                owner_id=x_voice_owner_id,
-                voice_session_id=x_voice_session_id,
-                turn_id=x_voice_turn_id,
-            ),
+            context=context,
         )
+
+    @application.get(
+        "/api/internal/voice/booking-draft",
+        response_model=BookingDraftToolResult,
+    )
+    def get_booking_draft(
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> BookingDraftToolResult:
+        try:
+            draft = current_store.get_or_create_draft(context)
+        except MerchantNotFoundError as error:
+            raise HTTPException(status_code=404, detail="merchant not found") from error
+        return draft_result(draft, context)
+
+    @application.patch(
+        "/api/internal/voice/booking-draft",
+        response_model=BookingDraftToolResult,
+    )
+    def update_booking_draft(
+        patch: BookingDraftPatch,
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> BookingDraftToolResult:
+        try:
+            draft, changed_fields = current_store.update_draft(
+                context,
+                patch.expected_version,
+                patch.changes(),
+            )
+        except DraftVersionConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "draft_version_conflict",
+                    "current_version": error.current_version,
+                },
+            ) from error
+        except UnknownServiceError as error:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "unknown_service", "service_id": str(error)},
+            ) from error
+        except MerchantNotFoundError as error:
+            raise HTTPException(status_code=404, detail="merchant not found") from error
+        return draft_result(draft, context, changed_fields)
 
     return application
 
