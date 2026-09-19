@@ -35,7 +35,7 @@ h1 { margin: 0; font-size: clamp(2.6rem, 7vw, 5.8rem); line-height: 0.98; letter
 
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 16px;
   margin-top: 52px;
 }

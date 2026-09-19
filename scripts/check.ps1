@@ -48,4 +48,4 @@ finally {
     Pop-Location
 }
 
-Write-Output 'All database-independent M0/M1/M2-1 checks passed.'
+Write-Output 'All database-independent M0/M1/M2 checks passed.'

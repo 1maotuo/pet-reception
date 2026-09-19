@@ -1,7 +1,8 @@
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -20,8 +21,15 @@ class SystemStatus(BaseModel):
 class MerchantService(BaseModel):
     id: str
     name_zh: str
-    duration_minutes: int
+    duration_minutes: int = Field(gt=0, le=1440)
     price_note: str
+
+
+class MerchantStaff(BaseModel):
+    id: str
+    display_name: str
+    service_ids: list[str]
+    source: str
 
 
 class DemoMerchant(BaseModel):
@@ -32,8 +40,80 @@ class DemoMerchant(BaseModel):
     phone: str
     address: str
     services: list[MerchantService]
+    staff: list[MerchantStaff] = Field(default_factory=list)
     is_demo: Literal[True] = True
     source: str
+
+    @field_validator("time_zone")
+    @classmethod
+    def require_iana_time_zone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            raise ValueError("time_zone must be a valid IANA zone") from error
+        return value
+
+
+class ServiceBufferSeed(BaseModel):
+    service_id: str
+    buffer_before_minutes: int = Field(ge=0, le=120)
+    buffer_after_minutes: int = Field(ge=0, le=120)
+
+
+class WeeklyWindowSeed(BaseModel):
+    weekday: int = Field(ge=0, le=6)
+    start_time: time
+    end_time: time
+
+    @model_validator(mode="after")
+    def require_forward_window(self) -> "WeeklyWindowSeed":
+        if self.start_time >= self.end_time:
+            raise ValueError("working window start_time must be before end_time")
+        return self
+
+
+class StaffSeed(BaseModel):
+    id: str
+    display_name: str
+    service_ids: list[str] = Field(min_length=1)
+    weekly_hours: list[WeeklyWindowSeed] = Field(min_length=1)
+    source: str
+
+    @model_validator(mode="after")
+    def require_unique_services_and_non_overlapping_hours(self) -> "StaffSeed":
+        if len(set(self.service_ids)) != len(self.service_ids):
+            raise ValueError("staff service_ids must be unique")
+        by_weekday: dict[int, list[WeeklyWindowSeed]] = {}
+        for window in self.weekly_hours:
+            by_weekday.setdefault(window.weekday, []).append(window)
+        for windows in by_weekday.values():
+            ordered = sorted(windows, key=lambda item: item.start_time)
+            for previous, current in zip(ordered, ordered[1:]):
+                if current.start_time < previous.end_time:
+                    raise ValueError("staff working windows must not overlap")
+        return self
+
+
+class MerchantSchedulingSeed(BaseModel):
+    slot_interval_minutes: int = Field(default=30, ge=5, le=120)
+    candidate_limit: int = Field(default=8, ge=1, le=24)
+    alternative_days: int = Field(default=7, ge=1, le=30)
+    service_buffers: list[ServiceBufferSeed]
+    staff: list[StaffSeed] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def require_unique_seed_ids(self) -> "MerchantSchedulingSeed":
+        buffer_ids = [item.service_id for item in self.service_buffers]
+        if len(set(buffer_ids)) != len(buffer_ids):
+            raise ValueError("service buffer ids must be unique")
+        staff_ids = [item.id for item in self.staff]
+        if len(set(staff_ids)) != len(staff_ids):
+            raise ValueError("staff ids must be unique")
+        return self
+
+
+class DemoMerchantConfig(DemoMerchant):
+    scheduling: MerchantSchedulingSeed | None = None
 
 
 class VoiceRequestContext(BaseModel):
@@ -62,6 +142,7 @@ DraftFieldName = Literal[
     "preferred_date",
     "preferred_time_of_day",
     "staff_preference_text",
+    "staff_id",
 ]
 
 DRAFT_MUTABLE_FIELDS: tuple[DraftFieldName, ...] = (
@@ -77,6 +158,7 @@ DRAFT_MUTABLE_FIELDS: tuple[DraftFieldName, ...] = (
     "preferred_date",
     "preferred_time_of_day",
     "staff_preference_text",
+    "staff_id",
 )
 
 
@@ -102,6 +184,7 @@ class BookingDraftPatch(BaseModel):
         "flexible",
     ] | None = None
     staff_preference_text: str | None = Field(default=None, max_length=200)
+    staff_id: str | None = Field(default=None, max_length=128)
 
     @field_validator(
         "customer_name",
@@ -113,6 +196,7 @@ class BookingDraftPatch(BaseModel):
         "need_description",
         "service_id",
         "staff_preference_text",
+        "staff_id",
         mode="before",
     )
     @classmethod
@@ -152,6 +236,7 @@ class BookingDraft(BaseModel):
     owner_id: str
     voice_session_id: str
     version: int
+    availability_revision: int
     customer_name: str | None
     contact_phone: str | None
     contact_phone_source: Literal["voice_user_provided", "web_user_provided"] | None
@@ -171,6 +256,7 @@ class BookingDraft(BaseModel):
         "flexible",
     ] | None
     staff_preference_text: str | None
+    staff_id: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -181,3 +267,61 @@ class BookingDraftToolResult(BaseModel):
     changed_fields: list[DraftFieldName] = Field(default_factory=list)
     missing_for_availability: list[str]
     missing_for_booking: list[str]
+
+
+class AvailabilitySearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_availability_revision: int = Field(ge=0)
+
+
+class AvailabilityCandidate(BaseModel):
+    id: UUID
+    staff_id: str
+    staff_display_name: str
+    service_id: str
+    starts_at: datetime
+    ends_at: datetime
+    busy_starts_at: datetime
+    busy_ends_at: datetime
+    merchant_time_zone: str
+
+
+class AlternativeAvailabilityDate(BaseModel):
+    date: date
+    first_start_at: datetime
+    available_staff_ids: list[str]
+
+
+class AvailabilitySearchResult(BaseModel):
+    id: UUID
+    status: Literal["available", "no_availability", "stale"]
+    is_current: bool
+    stale_reason: str | None = None
+    draft_id: UUID
+    draft_version: int
+    availability_revision: int
+    schedule_revision: int
+    service_id: str
+    preferred_date: date
+    preferred_time_of_day: Literal[
+        "morning",
+        "afternoon",
+        "evening",
+        "flexible",
+    ] | None
+    staff_id: str | None
+    merchant_time_zone: str
+    candidates: list[AvailabilityCandidate]
+    alternative_dates: list[AlternativeAvailabilityDate]
+    source: Literal["postgresql_recurring_staff_schedule"] = (
+        "postgresql_recurring_staff_schedule"
+    )
+    availability_checked: Literal[True] = True
+    booking_created: Literal[False] = False
+    created_at: datetime
+
+
+class AvailabilityToolResult(BaseModel):
+    search: AvailabilitySearchResult
+    context: VoiceRequestContext

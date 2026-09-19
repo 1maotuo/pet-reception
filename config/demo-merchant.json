@@ -20,6 +20,58 @@
     }
   ],
   "source": "m1-static-demo-catalog:demo-grooming-001",
+  "scheduling": {
+    "slot_interval_minutes": 30,
+    "candidate_limit": 8,
+    "alternative_days": 7,
+    "service_buffers": [
+      {
+        "service_id": "demo-bath",
+        "buffer_before_minutes": 10,
+        "buffer_after_minutes": 10
+      },
+      {
+        "service_id": "demo-full-groom",
+        "buffer_before_minutes": 15,
+        "buffer_after_minutes": 15
+      }
+    ],
+    "staff": [
+      {
+        "id": "demo-staff-lisa",
+        "display_name": "Lisa",
+        "service_ids": ["demo-bath", "demo-full-groom"],
+        "weekly_hours": [
+          { "weekday": 0, "start_time": "08:45", "end_time": "12:15" },
+          { "weekday": 0, "start_time": "12:45", "end_time": "17:15" },
+          { "weekday": 1, "start_time": "08:45", "end_time": "12:15" },
+          { "weekday": 1, "start_time": "12:45", "end_time": "17:15" },
+          { "weekday": 2, "start_time": "08:45", "end_time": "12:15" },
+          { "weekday": 2, "start_time": "12:45", "end_time": "17:15" },
+          { "weekday": 3, "start_time": "08:45", "end_time": "12:15" },
+          { "weekday": 3, "start_time": "12:45", "end_time": "17:15" },
+          { "weekday": 4, "start_time": "08:45", "end_time": "12:15" },
+          { "weekday": 4, "start_time": "12:45", "end_time": "17:15" },
+          { "weekday": 5, "start_time": "08:45", "end_time": "12:15" },
+          { "weekday": 5, "start_time": "12:45", "end_time": "17:15" }
+        ],
+        "source": "m2-demo-schedule:demo-staff-lisa"
+      },
+      {
+        "id": "demo-staff-marco",
+        "display_name": "Marco",
+        "service_ids": ["demo-bath"],
+        "weekly_hours": [
+          { "weekday": 1, "start_time": "09:50", "end_time": "14:10" },
+          { "weekday": 2, "start_time": "09:50", "end_time": "14:10" },
+          { "weekday": 3, "start_time": "09:50", "end_time": "14:10" },
+          { "weekday": 4, "start_time": "09:50", "end_time": "14:10" },
+          { "weekday": 5, "start_time": "09:50", "end_time": "14:10" }
+        ],
+        "source": "m2-demo-schedule:demo-staff-marco"
+      }
+    ]
+  },
   "front_desk": {
     "role_label": "宠物美容预约前台",
     "conversation_focus": "围绕本店的洗护、美容等服务咨询与预约意向展开；当前阶段只做咨询和预约前的需求澄清，不创建预约。",

@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from hmac import compare_digest
 from typing import Protocol
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +14,8 @@ from .schemas import (
     BookingDraft,
     BookingDraftPatch,
     BookingDraftToolResult,
+    AvailabilitySearchRequest,
+    AvailabilityToolResult,
     DatabaseStatus,
     DraftFieldName,
     MerchantToolResult,
@@ -21,10 +24,17 @@ from .schemas import (
 )
 from .store import (
     DataStore,
+    AvailabilityNeedsInputError,
+    AvailabilityPastDateError,
+    AvailabilityRevisionConflictError,
+    AvailabilityScheduleChangedError,
+    AvailabilitySearchNotFoundError,
     DraftVersionConflictError,
     MerchantNotFoundError,
     PostgresStore,
+    StaffNotQualifiedError,
     UnknownServiceError,
+    UnknownStaffError,
 )
 
 
@@ -67,14 +77,14 @@ def create_app(
 
     application = FastAPI(
         title="Pet Reception Backend",
-        version="0.2.0",
+        version="0.3.0",
         lifespan=lifespan,
     )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=[resolved_settings.web_origin],
         allow_credentials=True,
-        allow_methods=["GET", "PATCH"],
+        allow_methods=["GET", "PATCH", "POST"],
         allow_headers=[
             "Authorization",
             "Content-Type",
@@ -149,6 +159,8 @@ def create_app(
             for field in ("service_id", "preferred_date")
             if getattr(draft, field) is None
         ]
+        if draft.staff_preference_text and not draft.staff_id:
+            missing_for_availability.append("staff_id")
         missing_for_booking = [
             field
             for field in (
@@ -228,9 +240,88 @@ def create_app(
                 status_code=422,
                 detail={"code": "unknown_service", "service_id": str(error)},
             ) from error
+        except UnknownStaffError as error:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "unknown_staff", "staff_id": str(error)},
+            ) from error
+        except StaffNotQualifiedError as error:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "staff_not_qualified", "staff_id": str(error)},
+            ) from error
         except MerchantNotFoundError as error:
             raise HTTPException(status_code=404, detail="merchant not found") from error
         return draft_result(draft, context, changed_fields)
+
+    @application.post(
+        "/api/internal/voice/availability-searches",
+        response_model=AvailabilityToolResult,
+    )
+    def search_availability(
+        request: AvailabilitySearchRequest,
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> AvailabilityToolResult:
+        try:
+            result = current_store.search_availability(
+                context,
+                request.expected_availability_revision,
+            )
+        except AvailabilityRevisionConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "availability_revision_conflict",
+                    "current_revision": error.current_revision,
+                },
+            ) from error
+        except AvailabilityScheduleChangedError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "merchant_schedule_changed",
+                    "current_revision": error.current_revision,
+                },
+            ) from error
+        except AvailabilityNeedsInputError as error:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "needs_input",
+                    "missing_fields": list(error.missing_fields),
+                },
+            ) from error
+        except AvailabilityPastDateError as error:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "past_date", "preferred_date": str(error)},
+            ) from error
+        except (UnknownServiceError, UnknownStaffError) as error:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "unavailable", "reference": str(error)},
+            ) from error
+        except MerchantNotFoundError as error:
+            raise HTTPException(status_code=404, detail="merchant not found") from error
+        return AvailabilityToolResult(search=result, context=context)
+
+    @application.get(
+        "/api/internal/voice/availability-searches/{search_id}",
+        response_model=AvailabilityToolResult,
+    )
+    def get_availability_search(
+        search_id: UUID,
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> AvailabilityToolResult:
+        try:
+            result = current_store.get_availability_search(context, search_id)
+        except AvailabilitySearchNotFoundError as error:
+            raise HTTPException(status_code=404, detail="availability search not found") from error
+        except MerchantNotFoundError as error:
+            raise HTTPException(status_code=404, detail="merchant not found") from error
+        return AvailabilityToolResult(search=result, context=context)
 
     return application
 

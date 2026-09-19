@@ -1,15 +1,15 @@
 # Pet Reception
 
-面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库完成到 M2-1：在已验收的 M0/M1 工程与语音接缝之上，加入 PostgreSQL 商家目录和会话预约草稿。空档查询、正式预约和写入仍未实现。
+面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库已实现完整 M2：在已验收的 M0/M1 工程与语音接缝之上，加入 PostgreSQL 商家目录、会话预约草稿和真实美容人员排班查询。占位、正式预约和写入仍未实现。
 
 ## 当前组件
 
 - `web/`：React 19 + TypeScript 7 + Vite 8 状态页。
-- `backend/`：FastAPI 后端，提供健康检查、PostgreSQL 连接检查、持久化演示商家目录和受保护的会话预约草稿接口。
+- `backend/`：FastAPI 后端，提供健康检查、持久化商家/草稿，以及基于服务时长、缓冲、人员资格、每周工作窗口和商家时区的真实候选查询。
 - `voice-gateway/`：固定 `qwen-audio-agent@1.11.0`，复用其 WebUI、实时音频、播放、打断和重连机制；注入确定性的商家 HTTP 协调器，并通过版本守卫补丁配置同一套服务端 VAD、逻辑会话问候去重和 M1 工具许可集合。
 - `config/demo-merchant.json`：当前演示商家、前台角色、场景安全分流和能力开关的受信配置；后端和语音网关读取同一份商家来源。
 - `compose.yaml`：绑定本机回环地址的 PostgreSQL 17.11 开发服务。
-- `scripts/check-m2.ps1`：先跑全量数据库外回归，再在独立的 `*_test` PostgreSQL 数据库运行持久化测试。
+- `scripts/check-m2.ps1`：先跑全量数据库外回归，再在独立的 `*_test` PostgreSQL 数据库运行草稿、排班、隔离和晚到查询测试。
 
 ## 运行条件
 
@@ -95,7 +95,7 @@ npm run dev:voice
 .\scripts\check.ps1
 ```
 
-数据库运行后运行完整 M2-1 检查。脚本只创建/使用数据库名以 `_test` 结尾的独立测试库，不清空开发库：
+数据库运行后运行完整 M2 检查。脚本只创建/使用数据库名以 `_test` 结尾的独立测试库，不清空开发库：
 
 ```powershell
 .\scripts\check-m2.ps1
@@ -114,17 +114,21 @@ Invoke-RestMethod http://127.0.0.1:3101/api/health
 npm run probe:tool --workspace @pet-reception/voice-gateway
 ```
 
-## M2-1 草稿 API
+## M2 草稿与排班 API
 
 受保护入口为：
 
 - `GET /api/internal/voice/merchant-info`：从 PostgreSQL 读取当前绑定商家和服务。
 - `GET /api/internal/voice/booking-draft`：按受信 `merchant + owner + voice session` 获取或创建一个草稿。
 - `PATCH /api/internal/voice/booking-draft`：批量更新、纠正或显式清空字段；必须携带当前 `expected_version`。
+- `POST /api/internal/voice/availability-searches`：只从当前受信草稿取服务、日期、时段和人员，查询 PostgreSQL 排班。
+- `GET /api/internal/voice/availability-searches/{id}`：重新读取持久化结果，并检查它对当前排班条件是否仍有效。
 
 PATCH 只接受业务字段。`merchant_id`、`owner_id`、`voice_session_id`、来电号码和电话来源不能由模型在请求正文指定。未提供字段保持不变；显式 JSON `null` 不等于清空，清空必须列入 `clear_fields`；写入同值不会增加版本。未知服务返回 422，旧版本返回 409。
 
-响应分别返回 `missing_for_availability` 与 `missing_for_booking`。前者当前只要求真实服务与日期；后者还要求客户、电话、宠物信息，并始终缺少 M2-2 才会产生的 `selected_availability`。因此 M2-1 不会误称已能查空档或预约成功。
+响应分别返回 `missing_for_availability` 与 `missing_for_booking`。查询只要求真实服务与日期；如果用户点名人员，还必须先得到当前商家真实 `staff_id`。正式提交仍要求客户、电话、宠物及后续选择的候选时段，因此 M2 不会误称已经预约成功。
+
+排班查询使用独立的 `availability_revision`：服务、日期、时段或人员变化会使旧候选变成 `stale`，而姓名和联系电话变化不会无条件重查排班。候选时间带商家 IANA 时区偏移；无空档时只返回后续真实开放日期。查询结果明确包含 `availability_checked=true` 和 `booking_created=false`。
 
 可在 FastAPI 文档中查看契约，也可直接运行真实 PostgreSQL 行为测试：
 
@@ -142,7 +146,13 @@ Remove-Item Env:RUN_POSTGRES_TESTS
 .\scripts\probe-m2-draft.ps1
 ```
 
-当前 Qwen Session 仍只开放 M1 的只读商家资料工具。草稿业务入口已经可独立验收，但要到 M4 才接入实时模型；这样不会在 M2-2 空档和 M3 可信确认尚未完成时，让模型假装已经预约。
+完整排班演示会依次验证候选、电话修改保持有效、日期变化使旧结果失效、闭店日和替代日期：
+
+```powershell
+.\scripts\probe-m2-availability.ps1
+```
+
+演示种子中 Lisa 可做基础洗护和全套美容，Marco 只可做基础洗护；周日闭店。服务时长、前后缓冲和工作窗口均来自 PostgreSQL。当前 Qwen Session 仍只开放 M1 的只读商家资料工具；M2 业务 API 已完成，但要到 M4 才接入实时模型，避免在 M3 的占位和可信确认尚未完成时让模型假装已经预约。
 
 ## M1 真人语音检查
 

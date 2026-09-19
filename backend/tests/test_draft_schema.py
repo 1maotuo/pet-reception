@@ -1,7 +1,7 @@
 from pydantic import ValidationError
 import pytest
 
-from pet_reception_backend.schemas import BookingDraftPatch
+from pet_reception_backend.schemas import AvailabilitySearchRequest, BookingDraftPatch
 
 
 @pytest.mark.parametrize(
@@ -37,3 +37,23 @@ def test_draft_patch_preserves_omitted_fields_and_normalizes_text() -> None:
     )
 
     assert patch.changes() == {"pet_name": "皮皮", "pet_breed": None}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("merchant_id", "model-merchant"),
+        ("owner_id", "model-owner"),
+        ("service_id", "demo-bath"),
+        ("preferred_date", "2026-10-30"),
+        ("staff_id", "demo-staff-lisa"),
+    ],
+)
+def test_availability_search_only_accepts_the_expected_revision(
+    field: str,
+    value: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        AvailabilitySearchRequest.model_validate(
+            {"expected_availability_revision": 1, field: value}
+        )

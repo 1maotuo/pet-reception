@@ -22,6 +22,7 @@ describe('App', () => {
     expect(await screen.findByText('已连接 FastAPI')).toBeInTheDocument()
     expect(screen.getByText('连接正常')).toBeInTheDocument()
     expect(screen.getByText('PostgreSQL 连接正常')).toBeInTheDocument()
+    expect(screen.getByText('M2 API 可测试')).toBeInTheDocument()
   })
 
   it('does not claim success when the backend cannot be reached', async () => {

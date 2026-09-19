@@ -11,10 +11,11 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    Time,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 
 metadata = MetaData()
@@ -30,12 +31,21 @@ merchants = Table(
     Column("address", String(500), nullable=False),
     Column("is_demo", Boolean, nullable=False, server_default="true"),
     Column("source", String(200), nullable=False),
+    Column("slot_interval_minutes", Integer, nullable=False, server_default="30"),
+    Column("candidate_limit", Integer, nullable=False, server_default="8"),
+    Column("alternative_days", Integer, nullable=False, server_default="7"),
+    Column("schedule_revision", Integer, nullable=False, server_default="0"),
+    Column("schedule_fingerprint", String(64)),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     CheckConstraint(
         "merchant_type IN ('grooming', 'hospital', 'daycare')",
         name="ck_merchants_type",
     ),
+    CheckConstraint("slot_interval_minutes > 0", name="ck_merchants_slot_interval"),
+    CheckConstraint("candidate_limit > 0", name="ck_merchants_candidate_limit"),
+    CheckConstraint("alternative_days > 0", name="ck_merchants_alternative_days"),
+    CheckConstraint("schedule_revision >= 0", name="ck_merchants_schedule_revision"),
 )
 
 merchant_services = Table(
@@ -47,6 +57,8 @@ merchant_services = Table(
     Column("duration_minutes", Integer, nullable=False),
     Column("price_note", String(500), nullable=False),
     Column("display_order", Integer, nullable=False, server_default="0"),
+    Column("buffer_before_minutes", Integer, nullable=False, server_default="0"),
+    Column("buffer_after_minutes", Integer, nullable=False, server_default="0"),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     ForeignKeyConstraint(
@@ -57,6 +69,73 @@ merchant_services = Table(
     ),
     CheckConstraint("duration_minutes > 0", name="ck_services_positive_duration"),
     CheckConstraint("display_order >= 0", name="ck_services_display_order"),
+    CheckConstraint("buffer_before_minutes >= 0", name="ck_services_buffer_before"),
+    CheckConstraint("buffer_after_minutes >= 0", name="ck_services_buffer_after"),
+)
+
+staff_members = Table(
+    "staff_members",
+    metadata,
+    Column("merchant_id", String(128), primary_key=True),
+    Column("id", String(128), primary_key=True),
+    Column("display_name", String(200), nullable=False),
+    Column("active", Boolean, nullable=False, server_default="true"),
+    Column("source", String(200), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    ForeignKeyConstraint(
+        ["merchant_id"],
+        ["merchants.id"],
+        ondelete="CASCADE",
+        name="fk_staff_members_merchant",
+    ),
+)
+
+staff_service_qualifications = Table(
+    "staff_service_qualifications",
+    metadata,
+    Column("merchant_id", String(128), primary_key=True),
+    Column("staff_id", String(128), primary_key=True),
+    Column("service_id", String(128), primary_key=True),
+    ForeignKeyConstraint(
+        ["merchant_id", "staff_id"],
+        ["staff_members.merchant_id", "staff_members.id"],
+        ondelete="CASCADE",
+        name="fk_staff_qualifications_staff",
+    ),
+    ForeignKeyConstraint(
+        ["merchant_id", "service_id"],
+        ["merchant_services.merchant_id", "merchant_services.id"],
+        ondelete="CASCADE",
+        name="fk_staff_qualifications_service",
+    ),
+)
+
+staff_working_hours = Table(
+    "staff_working_hours",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("merchant_id", String(128), nullable=False),
+    Column("staff_id", String(128), nullable=False),
+    Column("weekday", Integer, nullable=False),
+    Column("start_time", Time, nullable=False),
+    Column("end_time", Time, nullable=False),
+    ForeignKeyConstraint(
+        ["merchant_id", "staff_id"],
+        ["staff_members.merchant_id", "staff_members.id"],
+        ondelete="CASCADE",
+        name="fk_staff_hours_staff",
+    ),
+    UniqueConstraint(
+        "merchant_id",
+        "staff_id",
+        "weekday",
+        "start_time",
+        "end_time",
+        name="uq_staff_working_window",
+    ),
+    CheckConstraint("weekday >= 0 AND weekday <= 6", name="ck_staff_hours_weekday"),
+    CheckConstraint("start_time < end_time", name="ck_staff_hours_forward"),
 )
 
 booking_drafts = Table(
@@ -67,6 +146,7 @@ booking_drafts = Table(
     Column("owner_id", String(128), nullable=False),
     Column("voice_session_id", String(128), nullable=False),
     Column("version", Integer, nullable=False, server_default="0"),
+    Column("availability_revision", Integer, nullable=False, server_default="0"),
     Column("customer_name", String(200)),
     Column("contact_phone", String(40)),
     Column("contact_phone_source", String(32)),
@@ -81,6 +161,7 @@ booking_drafts = Table(
     Column("preferred_date", Date),
     Column("preferred_time_of_day", String(32)),
     Column("staff_preference_text", String(200)),
+    Column("staff_id", String(128)),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     UniqueConstraint(
@@ -101,7 +182,17 @@ booking_drafts = Table(
         ondelete="RESTRICT",
         name="fk_booking_drafts_service",
     ),
+    ForeignKeyConstraint(
+        ["merchant_id", "staff_id"],
+        ["staff_members.merchant_id", "staff_members.id"],
+        ondelete="RESTRICT",
+        name="fk_booking_drafts_staff",
+    ),
     CheckConstraint("version >= 0", name="ck_booking_drafts_version"),
+    CheckConstraint(
+        "availability_revision >= 0",
+        name="ck_booking_drafts_availability_revision",
+    ),
     CheckConstraint(
         "contact_phone_source IS NULL OR contact_phone_source IN "
         "('voice_user_provided', 'web_user_provided')",
@@ -116,4 +207,86 @@ booking_drafts = Table(
         "pet_age_years IS NULL OR (pet_age_years >= 0 AND pet_age_years <= 50)",
         name="ck_booking_drafts_pet_age",
     ),
+)
+
+availability_searches = Table(
+    "availability_searches",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("draft_id", UUID(as_uuid=True), nullable=False),
+    Column("merchant_id", String(128), nullable=False),
+    Column("owner_id", String(128), nullable=False),
+    Column("voice_session_id", String(128), nullable=False),
+    Column("draft_version", Integer, nullable=False),
+    Column("availability_revision", Integer, nullable=False),
+    Column("schedule_revision", Integer, nullable=False),
+    Column("service_id", String(128), nullable=False),
+    Column("preferred_date", Date, nullable=False),
+    Column("preferred_time_of_day", String(32)),
+    Column("staff_id", String(128)),
+    Column("merchant_time_zone", String(80), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("alternative_dates", JSONB, nullable=False, server_default="[]"),
+    Column("source", String(100), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    ForeignKeyConstraint(
+        ["draft_id"],
+        ["booking_drafts.id"],
+        ondelete="CASCADE",
+        name="fk_availability_searches_draft",
+    ),
+    ForeignKeyConstraint(
+        ["merchant_id", "service_id"],
+        ["merchant_services.merchant_id", "merchant_services.id"],
+        ondelete="RESTRICT",
+        name="fk_availability_searches_service",
+    ),
+    ForeignKeyConstraint(
+        ["merchant_id", "staff_id"],
+        ["staff_members.merchant_id", "staff_members.id"],
+        ondelete="RESTRICT",
+        name="fk_availability_searches_staff",
+    ),
+    CheckConstraint(
+        "status IN ('available', 'no_availability')",
+        name="ck_availability_searches_status",
+    ),
+)
+
+availability_candidates = Table(
+    "availability_candidates",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("search_id", UUID(as_uuid=True), nullable=False),
+    Column("merchant_id", String(128), nullable=False),
+    Column("staff_id", String(128), nullable=False),
+    Column("service_id", String(128), nullable=False),
+    Column("staff_display_name", String(200), nullable=False),
+    Column("starts_at", DateTime(timezone=True), nullable=False),
+    Column("ends_at", DateTime(timezone=True), nullable=False),
+    Column("busy_starts_at", DateTime(timezone=True), nullable=False),
+    Column("busy_ends_at", DateTime(timezone=True), nullable=False),
+    Column("merchant_time_zone", String(80), nullable=False),
+    Column("display_order", Integer, nullable=False),
+    ForeignKeyConstraint(
+        ["search_id"],
+        ["availability_searches.id"],
+        ondelete="CASCADE",
+        name="fk_availability_candidates_search",
+    ),
+    ForeignKeyConstraint(
+        ["merchant_id", "staff_id"],
+        ["staff_members.merchant_id", "staff_members.id"],
+        ondelete="RESTRICT",
+        name="fk_availability_candidates_staff",
+    ),
+    ForeignKeyConstraint(
+        ["merchant_id", "service_id"],
+        ["merchant_services.merchant_id", "merchant_services.id"],
+        ondelete="RESTRICT",
+        name="fk_availability_candidates_service",
+    ),
+    UniqueConstraint("search_id", "display_order", name="uq_candidate_search_order"),
+    CheckConstraint("starts_at < ends_at", name="ck_candidate_service_interval"),
+    CheckConstraint("busy_starts_at < busy_ends_at", name="ck_candidate_busy_interval"),
 )

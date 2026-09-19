@@ -40,4 +40,4 @@ finally {
     Pop-Location
 }
 
-Write-Output 'All M2-1 checks passed against the independent PostgreSQL test database.'
+Write-Output 'All M2 checks passed against the independent PostgreSQL test database.'

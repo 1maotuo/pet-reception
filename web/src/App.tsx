@@ -8,6 +8,7 @@ type LoadState =
   | { kind: 'error'; message: string }
 
 const voiceGatewayUrl = import.meta.env.VITE_VOICE_GATEWAY_URL ?? 'http://127.0.0.1:3101'
+const backendDocsUrl = import.meta.env.VITE_BACKEND_DOCS_URL ?? 'http://127.0.0.1:8010/docs'
 
 function StatusDot({ ok }: { ok: boolean }) {
   return <span aria-hidden="true" className={`status-dot ${ok ? 'status-dot--ok' : 'status-dot--warn'}`} />
@@ -41,10 +42,10 @@ export default function App() {
   return (
     <main className="shell">
       <section className="hero">
-        <p className="eyebrow">M0 · M1 工程验证</p>
+        <p className="eyebrow">M2 工程验证</p>
         <h1>中文宠物服务语音前台</h1>
         <p className="lede">
-          当前页面只展示真实运行状态。预约写入尚未实现，也不会生成模拟预约编号。
+          当前可用真实商家、会话草稿和数据库排班查询候选时间。预约写入尚未实现，也不会生成模拟预约编号。
         </p>
       </section>
 
@@ -78,6 +79,15 @@ export default function App() {
           </div>
           <p>由 Qwen Audio Agent 独立提供</p>
           <a href={voiceGatewayUrl} rel="noreferrer" target="_blank">打开语音客户端</a>
+        </article>
+
+        <article className="status-card">
+          <div className="status-card__title">
+            <StatusDot ok={databaseOnline} />
+            <h2>真实排班查询</h2>
+          </div>
+          <p>{databaseOnline ? 'M2 API 可测试' : '等待数据库连接'}</p>
+          <a href={backendDocsUrl} rel="noreferrer" target="_blank">打开 API 文档</a>
         </article>
       </section>
 

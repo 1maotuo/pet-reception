@@ -112,6 +112,7 @@ def test_draft_batch_update_correction_clear_and_same_value(
             "preferred_date": "2026-10-02",
             "preferred_time_of_day": "afternoon",
             "staff_preference_text": "Lisa",
+            "staff_id": "demo-staff-lisa",
         },
     )
 
@@ -134,7 +135,9 @@ def test_draft_batch_update_correction_clear_and_same_value(
         "preferred_date",
         "preferred_time_of_day",
         "staff_preference_text",
+        "staff_id",
     }
+    assert batch_body["draft"]["availability_revision"] == 1
 
     correction = client.patch(
         "/api/internal/voice/booking-draft",
@@ -147,6 +150,7 @@ def test_draft_batch_update_correction_clear_and_same_value(
     assert corrected["draft"]["pet_name"] == "比比"
     assert corrected["draft"]["customer_name"] == "姚女士"
     assert corrected["draft"]["service_id"] == "demo-bath"
+    assert corrected["draft"]["availability_revision"] == 1
     assert corrected["changed_fields"] == ["pet_name"]
 
     same_value = client.patch(
