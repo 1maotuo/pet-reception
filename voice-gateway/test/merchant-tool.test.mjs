@@ -26,7 +26,12 @@ test('merchant tool sends server-bound merchant and gateway session context', as
         phone: '+1-415-555-0142',
         time_zone: 'America/Los_Angeles',
         source: 'm1-static-demo-catalog:demo-grooming-001',
-        services: [{ name_zh: '基础洗护', price_note: '$55 起' }],
+        services: [{
+          id: 'demo-bath',
+          name_zh: '基础洗护',
+          duration_minutes: 60,
+          price_note: '$55 起',
+        }],
       },
       context: {
         merchant_id: 'demo-grooming-001',
@@ -55,9 +60,17 @@ test('merchant tool sends server-bound merchant and gateway session context', as
     assert.equal(receivedHeaders['x-voice-owner-id'], 'user_signed-owner')
     assert.equal(receivedHeaders['x-voice-session-id'], 'session-a')
     assert.equal(receivedHeaders['x-voice-turn-id'], 'turn-a')
-    assert.match(result.content, /演示美容店/)
-    assert.match(result.content, /不能据此判断具体适用性，需由商家确认/)
+    const facts = JSON.parse(result.content)
+    assert.equal(facts.type, 'trusted_merchant_public_info')
+    assert.equal(facts.merchant.display_name, '演示美容店')
+    assert.equal(facts.merchant.phone, '+1-415-555-0142')
+    assert.equal(facts.merchant.address, '123 Demo Street')
+    assert.equal(facts.merchant.services[0].duration_minutes, 60)
+    assert.equal(facts.merchant.services[0].price_note, '$55 起')
+    assert.equal(facts.availability_checked, false)
+    assert.equal(facts.booking_created, false)
     assert.match(result.metadata.presentation.inline.content, /资料边界/)
+    assert.match(result.metadata.presentation.inline.content, /约 60 分钟/)
     assert.equal(result.metadata.source, 'm1-static-demo-catalog:demo-grooming-001')
   } finally {
     await backend.close()
@@ -75,4 +88,113 @@ test('merchant tool refuses missing trusted gateway context', async () => {
     client.getMerchantInfo({ ownerId: '', sessionId: 'session-a', turnId: 'turn-a' }),
     /trusted ownerId/,
   )
+})
+
+test('a pre-cancelled merchant query does not send an HTTP request', async () => {
+  let requests = 0
+  const backend = await listen((_request, response) => {
+    requests += 1
+    response.end('{}')
+  })
+  const controller = new AbortController()
+  controller.abort()
+
+  try {
+    const client = new MerchantToolClient({
+      backendBaseUrl: backend.origin,
+      merchantId: 'demo-grooming-001',
+      serviceToken: 'test-service-token',
+    })
+    await assert.rejects(
+      client.getMerchantInfo({
+        ownerId: 'user_signed-owner',
+        sessionId: 'session-a',
+        turnId: 'turn-a',
+        signal: controller.signal,
+      }),
+      { name: 'AbortError' },
+    )
+    assert.equal(requests, 0)
+  } finally {
+    await backend.close()
+  }
+})
+
+test('cancelling an in-flight merchant query aborts response reading', async () => {
+  let requestStarted
+  const started = new Promise((resolve) => { requestStarted = resolve })
+  const backend = await listen((_request, response) => {
+    requestStarted()
+    setTimeout(() => {
+      if (!response.destroyed) response.end('{}')
+    }, 250)
+  })
+  const controller = new AbortController()
+
+  try {
+    const client = new MerchantToolClient({
+      backendBaseUrl: backend.origin,
+      merchantId: 'demo-grooming-001',
+      serviceToken: 'test-service-token',
+    })
+    const query = client.getMerchantInfo({
+      ownerId: 'user_signed-owner',
+      sessionId: 'session-a',
+      turnId: 'turn-a',
+      signal: controller.signal,
+    })
+    await started
+    controller.abort()
+    await assert.rejects(query, { name: 'AbortError' })
+  } finally {
+    await backend.close()
+  }
+})
+
+test('merchant HTTP errors are reported instead of returning fake facts', async () => {
+  const backend = await listen((_request, response) => {
+    response.statusCode = 500
+    response.end('backend failed')
+  })
+
+  try {
+    const client = new MerchantToolClient({
+      backendBaseUrl: backend.origin,
+      merchantId: 'demo-grooming-001',
+      serviceToken: 'test-service-token',
+    })
+    await assert.rejects(
+      client.getMerchantInfo({
+        ownerId: 'user_signed-owner',
+        sessionId: 'session-a',
+        turnId: 'turn-a',
+      }),
+      /merchant tool request failed with HTTP 500/,
+    )
+  } finally {
+    await backend.close()
+  }
+})
+
+test('a slow merchant HTTP request stops at the configured timeout', async () => {
+  const backend = await listen(() => {})
+
+  try {
+    const client = new MerchantToolClient({
+      backendBaseUrl: backend.origin,
+      merchantId: 'demo-grooming-001',
+      serviceToken: 'test-service-token',
+      requestTimeoutMs: 25,
+    })
+    await assert.rejects(
+      client.getMerchantInfo({
+        ownerId: 'user_signed-owner',
+        sessionId: 'session-a',
+        turnId: 'turn-a',
+      }),
+      { name: 'TimeoutError' },
+    )
+  } finally {
+    await backend.close()
+  }
 })

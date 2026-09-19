@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     database_connect_timeout_seconds: int = Field(default=2, ge=1, le=10)
     voice_gateway_service_token: str = ""
     demo_merchant_id: str = "demo-grooming-001"
+    merchant_config_path: str = "config/demo-merchant.json"
 
 
 @lru_cache

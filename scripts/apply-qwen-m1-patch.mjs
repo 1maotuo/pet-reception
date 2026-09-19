@@ -11,9 +11,6 @@ const AUDIO_INPUT_BOOTSTRAP = `(() => {
 
   const originalGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices)
   const normalize = value => String(value || '').trim().toLocaleLowerCase()
-  const hasExplicitDevice = audio => Boolean(
-    audio && typeof audio === 'object' && audio.deviceId,
-  )
   const physicalMatch = (devices, preferredLabel) => {
     const wanted = normalize(preferredLabel)
     const candidates = devices.filter(device => (
@@ -21,7 +18,15 @@ const AUDIO_INPUT_BOOTSTRAP = `(() => {
       && !['default', 'communications'].includes(device.deviceId)
       && normalize(device.label).includes(wanted)
     ))
-    return candidates[0] || null
+    const exact = candidates.filter(device => normalize(device.label) === wanted)
+    const eligible = exact.length ? exact : candidates
+    if (eligible.length > 1) {
+      throw new DOMException(
+        '配置的麦克风名称匹配到多个物理设备：' + preferredLabel,
+        'NotFoundError',
+      )
+    }
+    return eligible[0] || null
   }
 
   async function configuredAudioInput(requestedAudio) {
@@ -29,7 +34,7 @@ const AUDIO_INPUT_BOOTSTRAP = `(() => {
     if (!response.ok) throw new Error('无法读取麦克风配置')
     const health = await response.json()
     const preferredLabel = String(health.audioInput?.preferredLabel || '').trim()
-    if (!preferredLabel || hasExplicitDevice(requestedAudio)) {
+    if (!preferredLabel) {
       return { preferredLabel, audio: requestedAudio }
     }
 
@@ -168,6 +173,77 @@ export function applyQwenM1Patch(packageRoot) {
     },
   ])
 
+  patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'realtime-gateway.mjs'), [
+    {
+      label: 'logical session greeting registry',
+      alreadyApplied: 'export function createInitialGreetingRegistry({ maxSessions = 500 } = {}) {',
+      original: `export function acceptsPlaybackReceipt({
+  outputEnabled,
+  active,
+  responseKnown,
+}) {
+  return outputEnabled === true && active === true && responseKnown === true
+}
+
+function clientDescriptor(event = {}) {`,
+      replacement: `export function acceptsPlaybackReceipt({
+  outputEnabled,
+  active,
+  responseKnown,
+}) {
+  return outputEnabled === true && active === true && responseKnown === true
+}
+
+// Pet Reception M1 de-duplicates the opening greeting by trusted logical call,
+// without replacing the upstream WebSocket or provider reconnect mechanisms.
+export function createInitialGreetingRegistry({ maxSessions = 500 } = {}) {
+  const claimed = new Map()
+  const limit = Math.max(1, Number(maxSessions) || 500)
+  return {
+    claim(ownerId, sessionId) {
+      const key = String(ownerId || '') + '\\u0000' + String(sessionId || '')
+      if (claimed.has(key)) {
+        claimed.delete(key)
+        claimed.set(key, true)
+        return false
+      }
+      while (claimed.size >= limit) claimed.delete(claimed.keys().next().value)
+      claimed.set(key, true)
+      return true
+    },
+  }
+}
+
+function clientDescriptor(event = {}) {`,
+    },
+    {
+      label: 'create a greeting registry for the gateway lifetime',
+      alreadyApplied: 'const initialGreetingRegistry = createInitialGreetingRegistry({',
+      original: `  const activeVoiceClients = new ActiveVoiceClients()
+  const voiceConnections = new Map()
+
+  // A suspension is global, not per owner:`,
+      replacement: `  const activeVoiceClients = new ActiveVoiceClients()
+  const voiceConnections = new Map()
+  const initialGreetingRegistry = createInitialGreetingRegistry({
+    maxSessions: config.maxConversationSessions,
+  })
+
+  // A suspension is global, not per owner:`,
+    },
+    {
+      label: 'claim the opening greeting by owner and logical session',
+      alreadyApplied: '&& initialGreetingRegistry.claim(ownerId, sessionId)',
+      original: `            && !initialGreetingDelivered
+            && String(initialGreeting || '').trim()
+          ) {`,
+      replacement: `            && !initialGreetingDelivered
+            && String(initialGreeting || '').trim()
+            && initialGreetingRegistry.claim(ownerId, sessionId)
+          ) {`,
+    },
+  ])
+
   patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'providers', 'dashscope.mjs'), [
     {
       label: 'configured server-side turn detection',
@@ -184,6 +260,100 @@ export function applyQwenM1Patch(packageRoot) {
       label: 'configure noisy-room VAD threshold and slow-pause window',
       original: `  const silenceDurationMs = Number(\n    process.env.PET_RECEPTION_SILENCE_DURATION_MS || 1200,\n  )\n  return {\n    type: 'server_vad',\n    silence_duration_ms: silenceDurationMs,\n  }`,
       replacement: `  const silenceDurationMs = Number(\n    process.env.PET_RECEPTION_SILENCE_DURATION_MS || 1800,\n  )\n  const threshold = Number(\n    process.env.PET_RECEPTION_VAD_THRESHOLD || 0.65,\n  )\n  return {\n    type: 'server_vad',\n    threshold,\n    silence_duration_ms: silenceDurationMs,\n  }`,
+    },
+  ])
+
+  patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'frontend-tools.mjs'), [
+    {
+      label: 'server-controlled M1 frontend tool allowlist and descriptions',
+      alreadyApplied: 'const PET_RECEPTION_TOOL_DESCRIPTIONS = new Map([',
+      original: `export function frontendTools(agentContext = {}) {
+  const states = Array.isArray(agentContext.client?.states)
+    ? agentContext.client.states
+    : []
+  return states.includes('sleeping')
+    ? [...TOOLS, enterSleepTool]
+    : TOOLS
+}`,
+      replacement: `// Pet Reception M1 exposes only its bounded read-only business workflow.
+const PET_RECEPTION_TOOL_DESCRIPTIONS = new Map([
+  [SPAWN_THINKING_TOOL_NAME, '查询服务端绑定的当前演示商家公开资料。只用于回答本店名称、地址、电话、时区、服务、时长和价格说明；返回 accepted 只表示查询已受理，不代表预约成功。'],
+  [CANCEL_AGENT_TASK_TOOL_NAME, '取消当前语音会话中仍在进行的只读商家资料查询。只能取消系统返回的当前会话工作，不创建或修改预约。'],
+  [GET_AGENT_TASK_STATUS_TOOL_NAME, '查询当前语音会话中此前只读商家资料查询的状态或结果。不能查询其他用户或其他商家的工作。'],
+])
+
+function configuredToolAllowlist() {
+  const configured = String(
+    process.env.PET_RECEPTION_FRONTEND_TOOL_ALLOWLIST || '',
+  ).trim()
+  if (!configured) return null
+  return new Set(configured.split(',').map(value => value.trim()).filter(Boolean))
+}
+
+function applyPetReceptionDescription(tool) {
+  const description = PET_RECEPTION_TOOL_DESCRIPTIONS.get(tool.function?.name)
+  if (!description) return tool
+  return {
+    ...tool,
+    function: { ...tool.function, description },
+  }
+}
+
+export function frontendTools(agentContext = {}) {
+  const states = Array.isArray(agentContext.client?.states)
+    ? agentContext.client.states
+    : []
+  const tools = states.includes('sleeping')
+    ? [...TOOLS, enterSleepTool]
+    : TOOLS
+  const allowed = configuredToolAllowlist()
+  return allowed
+    ? tools.filter(tool => allowed.has(tool.function?.name)).map(applyPetReceptionDescription)
+    : tools
+}`,
+    },
+  ])
+
+  patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'tools', 'tool-call-handler.mjs'), [
+    {
+      label: 'runtime enforcement for the M1 frontend tool allowlist',
+      alreadyApplied: 'function configuredPetReceptionToolAllowlist() {',
+      original: `const SENSITIVE_MEMORY = /(?:pass(?:word)?|secret|api[_ -]?key|access[_ -]?token|credential|验证码|密码|密钥|令牌|\\bsk-[a-z0-9_-]+)/i`,
+      replacement: `const SENSITIVE_MEMORY = /(?:pass(?:word)?|secret|api[_ -]?key|access[_ -]?token|credential|验证码|密码|密钥|令牌|\\bsk-[a-z0-9_-]+)/i
+
+function configuredPetReceptionToolAllowlist() {
+  const configured = String(
+    process.env.PET_RECEPTION_FRONTEND_TOOL_ALLOWLIST || '',
+  ).trim()
+  if (!configured) return null
+  return new Set(configured.split(',').map(value => value.trim()).filter(Boolean))
+}`,
+    },
+    {
+      label: 'reject forced calls outside the M1 tool allowlist',
+      alreadyApplied: `failure('tool_not_allowed', '当前前台不提供这个工具能力。')`,
+      original: `    if (this.isStale(turnId, generation)) {
+      await this.closeStaleCall(callId, turnId)
+      return
+    }
+
+    if (toolName === GET_CURRENT_TIME_TOOL_NAME) {`,
+      replacement: `    if (this.isStale(turnId, generation)) {
+      await this.closeStaleCall(callId, turnId)
+      return
+    }
+
+    const allowedTools = configuredPetReceptionToolAllowlist()
+    if (allowedTools && !allowedTools.has(toolName)) {
+      await this.sendOutput(
+        callId,
+        failure('tool_not_allowed', '当前前台不提供这个工具能力。'),
+        turnId,
+      )
+      return
+    }
+
+    if (toolName === GET_CURRENT_TIME_TOOL_NAME) {`,
     },
   ])
 

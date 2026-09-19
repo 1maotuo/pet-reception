@@ -6,7 +6,7 @@
 
 - `web/`：React 19 + TypeScript 7 + Vite 8 状态页。
 - `backend/`：FastAPI 后端，提供健康检查、PostgreSQL 连接检查和受保护的演示商家资料接口。
-- `voice-gateway/`：固定 `qwen-audio-agent@1.11.0`，复用其 WebUI、实时音频、播放、打断和重连机制；注入确定性的商家 HTTP 协调器，并通过版本守卫补丁配置同一套服务端 VAD 与首次商家问候。
+- `voice-gateway/`：固定 `qwen-audio-agent@1.11.0`，复用其 WebUI、实时音频、播放、打断和重连机制；注入确定性的商家 HTTP 协调器，并通过版本守卫补丁配置同一套服务端 VAD、逻辑会话问候去重和 M1 工具许可集合。
 - `config/demo-merchant.json`：当前演示商家、前台角色、场景安全分流和能力开关的受信配置；后端和语音网关读取同一份商家来源。
 - `compose.yaml`：绑定本机回环地址的 PostgreSQL 17.11 开发服务。
 
@@ -45,6 +45,8 @@ backend\.venv\Scripts\python.exe -m pip install -e backend --no-deps
 ```
 
 `npm ci` 会运行 `scripts/apply-qwen-m1-patch.mjs`。该脚本只接受锁定的 Qwen Audio Agent 1.11.0；版本不匹配会停止安装，避免对未知上游静默打补丁。
+
+需要替换演示商家时，在本地 `.env` 同时设置匹配的 `DEMO_MERCHANT_ID` 和 `MERCHANT_CONFIG_PATH`。FastAPI 与语音网关会读取同一个文件；文件内 ID 与环境变量不一致时启动失败，不会静默形成两套商家事实。
 
 ## 启动
 
@@ -121,7 +123,7 @@ npm run probe:tool --workspace @pet-reception/voice-gateway
 8. 在助手播报时插话，确认播放及时停止，随后继续提问仍可回答；问候被打断时不应强行重播。
 9. 结束并新建会话，确认新连接会重新问候，旧会话工具结果不串入新会话。
 
-当前工具只有只读商家资料。任何预约、空档或确认请求都必须如实说明尚未实现；不得生成预约编号。
+当前模型只看到三个受控入口：只读商家资料查询、该查询的状态读取和取消。上游通用的记忆、清单、提醒、当前时间、权限回复等工具既不进入模型 Session，也会在被强制调用时由运行时拒绝。任何预约、空档或确认请求都必须如实说明尚未实现；不得生成预约编号。
 
 停顿参数位于根目录被忽略的 `.env`：
 
@@ -134,12 +136,12 @@ VOICE_AUDIO_INPUT_LABEL=USB Audio Device
 
 静音时间有效范围为 200–6000 ms，声学阈值有效范围为 -1 到 1；阈值越高越不容易被背景噪声触发，但也要求说话更清楚。调整后需重启语音网关；这些都是千问原生服务端 VAD 参数，不是浏览器侧的第二套断句逻辑。
 
-`VOICE_AUDIO_INPUT_LABEL` 用于匹配物理录音设备名称。本机已配置为耳机对应的 `USB Audio Device`；页面取得权限后会把匹配设备的真实 `deviceId` 传给上游原有 `getUserMedia()`。配置不为空但设备不存在时，页面明确报错，不会静默回退到电脑内置麦克风。该薄适配不替换上游录音、播放、VAD 或重连实现。
+`VOICE_AUDIO_INPUT_LABEL` 用于匹配物理录音设备名称。本机已配置为耳机对应的 `USB Audio Device`；页面取得权限后会把匹配设备的真实 `deviceId` 传给上游原有 `getUserMedia()`。required 模式会覆盖调用方传入的冲突 `deviceId`；设备不存在或同一标签匹配多个物理设备时明确报错，不会静默回退或任意选一个。该薄适配不替换上游录音、播放、VAD 或重连实现。
 
 当前 0.65/1800 ms 只是面向普通室内噪声的首轮实验值，不代表所有麦克风和口音都已验收。背景声仍频繁触发时可小步提高阈值；正常说话漏收时应降低阈值；句中停顿仍被拆开时延长静音时间；说完等待过久时缩短静音时间。每次只改一个参数并重启网关，保留真人对照结果。
 
 ## 身份与密钥边界
 
-Qwen Gateway 使用签名的 HttpOnly 身份 Cookie。模型只能提交通用工具目标，不能提交授权用的 `merchant_id`、`owner_id`、`session_id` 或 `turn_id`。薄协调器从 Gateway 的服务端上下文读取这些值，以服务令牌调用 FastAPI；FastAPI 同时验证令牌和固定商家绑定。
+Qwen Gateway 使用签名的 HttpOnly 身份 Cookie。模型只能提交只读查询目标，不能提交授权用的 `merchant_id`、`owner_id`、`session_id` 或 `turn_id`。薄协调器从 Gateway 的服务端上下文读取这些值，以服务令牌调用 FastAPI；FastAPI 同时验证令牌和固定商家绑定。工具结果把完整可信事实（电话、地址、服务时长、价格限定与来源）放入模型结果正文，简短口播与页面卡片只是不同呈现，不能代替事实载荷。
 
 上游版本与扩展边界见 `docs/upstream/QWEN_AUDIO_AGENT.md`，本轮命令与结果见 `docs/evidence/M0_M1_2026-09-19.md`。

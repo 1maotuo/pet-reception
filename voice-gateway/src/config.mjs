@@ -72,6 +72,11 @@ export function configureEnvironment() {
   process.env.PET_RECEPTION_TURN_DETECTION_TYPE = turnDetectionType
   process.env.PET_RECEPTION_SILENCE_DURATION_MS = String(silenceDurationMs)
   process.env.PET_RECEPTION_VAD_THRESHOLD = String(vadThreshold)
+  process.env.PET_RECEPTION_FRONTEND_TOOL_ALLOWLIST = [
+    'spawn_thinking',
+    'cancel_agent_task',
+    'get_agent_task_status',
+  ].join(',')
   delete process.env.AGENT_PROTOCOL
 
   const backendPort = process.env.BACKEND_PORT || '8010'

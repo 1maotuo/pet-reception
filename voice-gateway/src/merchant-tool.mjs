@@ -12,13 +12,30 @@ function responseError(response, operation) {
   return new Error(`${operation} failed with HTTP ${response.status}`)
 }
 
+function requestSignal(externalSignal, timeoutMs) {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs)
+  return externalSignal
+    ? AbortSignal.any([externalSignal, timeoutSignal])
+    : timeoutSignal
+}
+
 export class MerchantToolClient {
-  constructor({ backendBaseUrl, merchantId, serviceToken, fetchImpl = fetch }) {
+  constructor({
+    backendBaseUrl,
+    merchantId,
+    serviceToken,
+    fetchImpl = fetch,
+    requestTimeoutMs = 5000,
+  }) {
     this.backendBaseUrl = String(backendBaseUrl).replace(/\/$/, '')
     this.merchantId = requireTrustedId('merchantId', merchantId)
     this.serviceToken = String(serviceToken || '')
     this.fetch = fetchImpl
+    this.requestTimeoutMs = requestTimeoutMs
     if (!this.serviceToken) throw new Error('voice gateway service token is required')
+    if (!Number.isInteger(this.requestTimeoutMs) || this.requestTimeoutMs < 1) {
+      throw new Error('merchant tool request timeout must be a positive integer')
+    }
   }
 
   async health() {
@@ -43,7 +60,7 @@ export class MerchantToolClient {
     }
   }
 
-  async getMerchantInfo({ ownerId, sessionId, turnId }) {
+  async getMerchantInfo({ ownerId, sessionId, turnId, signal }) {
     const trustedOwnerId = requireTrustedId('ownerId', ownerId)
     const trustedSessionId = requireTrustedId('sessionId', sessionId)
     const trustedTurnId = requireTrustedId('turnId', turnId)
@@ -58,7 +75,7 @@ export class MerchantToolClient {
           'X-Voice-Session-ID': trustedSessionId,
           'X-Voice-Turn-ID': trustedTurnId,
         },
-        signal: AbortSignal.timeout(5000),
+        signal: requestSignal(signal, this.requestTimeoutMs),
       },
     )
     if (!response.ok) throw responseError(response, 'merchant tool request')
@@ -74,10 +91,35 @@ function merchantSpeech(result) {
   return `${merchant.display_name}位于${merchant.address}，当地时区是${merchant.time_zone}。当前演示服务包括：${services}。这些资料来自明确标注的演示目录，尚未查询正式预约空档。公开目录只列出服务名称和价格说明，未说明包含步骤、适用宠物或性格处理方式；不能据此判断具体适用性，需由商家确认。`
 }
 
+function merchantFacts(result) {
+  const merchant = result.merchant
+  return JSON.stringify({
+    type: 'trusted_merchant_public_info',
+    merchant: {
+      id: merchant.id,
+      display_name: merchant.display_name,
+      address: merchant.address,
+      phone: merchant.phone,
+      time_zone: merchant.time_zone,
+      is_demo: merchant.is_demo,
+      source: merchant.source,
+      services: merchant.services.map((service) => ({
+        id: service.id,
+        name_zh: service.name_zh,
+        duration_minutes: service.duration_minutes,
+        price_note: service.price_note,
+      })),
+    },
+    data_boundary: '公开目录只列出服务名称、时长和价格说明；未提供服务步骤、适用宠物或性格处理方式。',
+    availability_checked: false,
+    booking_created: false,
+  }, null, 2)
+}
+
 function merchantInline(result) {
   const merchant = result.merchant
   const serviceLines = merchant.services
-    .map((service) => `- ${service.name_zh}：${service.price_note}`)
+    .map((service) => `- ${service.name_zh}：约 ${service.duration_minutes} 分钟；${service.price_note}`)
     .join('\n')
   return [
     `## ${merchant.display_name}`,
@@ -102,10 +144,11 @@ export class MerchantCoordinator {
       ownerId: options.ownerId,
       sessionId: options.sessionId,
       turnId: options.turnId,
+      signal: options.signal,
     })
     const speech = merchantSpeech(result)
     return {
-      content: speech,
+      content: merchantFacts(result),
       metadata: {
         presentation: {
           speech,

@@ -1,4 +1,8 @@
+import json
+from pathlib import Path
+
 from fastapi.testclient import TestClient
+import pytest
 
 from pet_reception_backend.app import create_app
 from pet_reception_backend.config import Settings
@@ -22,6 +26,32 @@ def settings() -> Settings:
         database_url="",
         voice_gateway_service_token="test-service-token",
         demo_merchant_id="demo-grooming-001",
+    )
+
+
+def write_merchant(path: Path, merchant_id: str, display_name: str) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "id": merchant_id,
+                "display_name": display_name,
+                "merchant_type": "grooming",
+                "time_zone": "America/Los_Angeles",
+                "phone": "+1-415-555-0199",
+                "address": "456 Review Street",
+                "services": [
+                    {
+                        "id": "review-bath",
+                        "name_zh": "复核洗护",
+                        "duration_minutes": 75,
+                        "price_note": "演示价格：$65 起",
+                    }
+                ],
+                "source": f"test-catalog:{merchant_id}",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
     )
 
 
@@ -110,3 +140,77 @@ def test_voice_tool_rejects_a_different_merchant_binding() -> None:
         )
 
     assert response.status_code == 403
+
+
+def test_voice_tool_loads_the_configured_merchant_file(tmp_path: Path) -> None:
+    merchant_path = tmp_path / "merchant-b.json"
+    write_merchant(merchant_path, "review-grooming-002", "Review Grooming B")
+    configured = Settings(
+        database_url="",
+        voice_gateway_service_token="test-service-token",
+        demo_merchant_id="review-grooming-002",
+        merchant_config_path=str(merchant_path),
+    )
+    probe = StubProbe(DatabaseStatus(status="connected", detail="ok"))
+
+    with TestClient(create_app(configured, probe)) as client:
+        response = client.get(
+            "/api/internal/voice/merchant-info",
+            headers={
+                "Authorization": "Bearer test-service-token",
+                "X-Voice-Owner-ID": "user_signed-owner",
+                "X-Voice-Session-ID": "session-b",
+                "X-Voice-Turn-ID": "turn-b",
+                "X-Merchant-ID": "review-grooming-002",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["merchant"]["display_name"] == "Review Grooming B"
+
+
+def test_voice_tool_reloads_same_id_facts_from_configured_file(tmp_path: Path) -> None:
+    merchant_path = tmp_path / "merchant-updated.json"
+    write_merchant(merchant_path, "demo-grooming-001", "Updated Demo Grooming")
+    configured = Settings(
+        database_url="",
+        voice_gateway_service_token="test-service-token",
+        demo_merchant_id="demo-grooming-001",
+        merchant_config_path=str(merchant_path),
+    )
+    probe = StubProbe(DatabaseStatus(status="connected", detail="ok"))
+
+    with TestClient(create_app(configured, probe)) as client:
+        response = client.get(
+            "/api/internal/voice/merchant-info",
+            headers={
+                "Authorization": "Bearer test-service-token",
+                "X-Voice-Owner-ID": "user_signed-owner",
+                "X-Voice-Session-ID": "session-a",
+                "X-Voice-Turn-ID": "turn-a",
+                "X-Merchant-ID": "demo-grooming-001",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["merchant"]["display_name"] == "Updated Demo Grooming"
+
+
+def test_backend_rejects_a_merchant_id_that_does_not_match_the_file(
+    tmp_path: Path,
+) -> None:
+    merchant_path = tmp_path / "merchant-mismatch.json"
+    write_merchant(merchant_path, "review-grooming-002", "Review Grooming B")
+    configured = Settings(
+        database_url="",
+        voice_gateway_service_token="test-service-token",
+        demo_merchant_id="demo-grooming-001",
+        merchant_config_path=str(merchant_path),
+    )
+    probe = StubProbe(DatabaseStatus(status="connected", detail="ok"))
+
+    with pytest.raises(
+        ValueError,
+        match="DEMO_MERCHANT_ID must match the trusted merchant configuration",
+    ):
+        create_app(configured, probe)

@@ -85,3 +85,76 @@ test('fails instead of silently falling back when the configured microphone is a
   assert.equal(requests.length, 0)
   assert.equal(context.window.__petReceptionAudioInput.status, 'failed')
 })
+
+test('required microphone overrides conflicting explicit and default device ids', async () => {
+  const requests = []
+  const usbTrack = {
+    label: '麦克风 (USB Audio Device)',
+    getSettings: () => ({ deviceId: 'usb-physical-id' }),
+  }
+  const mediaDevices = {
+    enumerateDevices: async () => [
+      { kind: 'audioinput', deviceId: 'array-id', label: '麦克风阵列 (Senary Audio)' },
+      { kind: 'audioinput', deviceId: 'usb-physical-id', label: '麦克风 (USB Audio Device)' },
+      { kind: 'audioinput', deviceId: 'default', label: '默认 - 麦克风 (USB Audio Device)' },
+    ],
+    getUserMedia: async (constraints) => {
+      requests.push(constraints)
+      return { getAudioTracks: () => [usbTrack] }
+    },
+  }
+  const context = {
+    DOMException,
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({ audioInput: { preferredLabel: 'USB Audio Device' } }),
+    }),
+    navigator: { mediaDevices },
+    window: {},
+  }
+  vm.runInNewContext(
+    readFileSync(resolve(qwenRoot, 'web', 'dist', 'pet-reception-audio-input.js'), 'utf8'),
+    context,
+  )
+
+  await mediaDevices.getUserMedia({ audio: { deviceId: { exact: 'array-id' } } })
+  await mediaDevices.getUserMedia({ audio: { deviceId: { exact: 'default' } } })
+
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].audio.deviceId.exact, 'usb-physical-id')
+  assert.equal(requests[1].audio.deviceId.exact, 'usb-physical-id')
+})
+
+test('required microphone fails when its label matches multiple physical devices', async () => {
+  const requests = []
+  const mediaDevices = {
+    enumerateDevices: async () => [
+      { kind: 'audioinput', deviceId: 'usb-a', label: 'Headset USB Audio Device' },
+      { kind: 'audioinput', deviceId: 'usb-b', label: 'Desk USB Audio Device' },
+    ],
+    getUserMedia: async (constraints) => {
+      requests.push(constraints)
+      return { getAudioTracks: () => [] }
+    },
+  }
+  const context = {
+    DOMException,
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({ audioInput: { preferredLabel: 'USB Audio Device' } }),
+    }),
+    navigator: { mediaDevices },
+    window: {},
+  }
+  vm.runInNewContext(
+    readFileSync(resolve(qwenRoot, 'web', 'dist', 'pet-reception-audio-input.js'), 'utf8'),
+    context,
+  )
+
+  await assert.rejects(
+    mediaDevices.getUserMedia({ audio: true }),
+    /匹配到多个物理设备：USB Audio Device/,
+  )
+  assert.equal(requests.length, 0)
+  assert.equal(context.window.__petReceptionAudioInput.status, 'failed')
+})

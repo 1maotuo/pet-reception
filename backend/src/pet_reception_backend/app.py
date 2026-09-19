@@ -8,7 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import Settings, get_settings
 from .database import DatabaseProbe
-from .merchant_catalog import get_demo_merchant
+from .merchant_catalog import get_demo_merchant, load_demo_merchant
 from .schemas import (
     DatabaseStatus,
     MerchantToolResult,
@@ -31,6 +31,11 @@ def create_app(
     database_probe: Probe | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
+    configured_merchant = load_demo_merchant(resolved_settings.merchant_config_path)
+    if configured_merchant.id != resolved_settings.demo_merchant_id:
+        raise ValueError(
+            "DEMO_MERCHANT_ID must match the trusted merchant configuration"
+        )
     probe = database_probe or DatabaseProbe(
         resolved_settings.database_url,
         resolved_settings.database_connect_timeout_seconds,
@@ -97,7 +102,7 @@ def create_app(
             raise HTTPException(status_code=401, detail="voice gateway authentication failed")
         if x_merchant_id != resolved_settings.demo_merchant_id:
             raise HTTPException(status_code=403, detail="merchant is not bound to this gateway")
-        merchant = get_demo_merchant(x_merchant_id)
+        merchant = get_demo_merchant(configured_merchant, x_merchant_id)
         if merchant is None:
             raise HTTPException(status_code=404, detail="merchant not found")
         return MerchantToolResult(

@@ -13,7 +13,8 @@ const result = await coordinator.run(
 )
 
 console.log(JSON.stringify({
-  speech: result.content,
+  facts: JSON.parse(result.content),
+  speech: result.metadata.presentation.speech,
   merchantId: result.metadata.merchantId,
   source: result.metadata.source,
 }, null, 2))

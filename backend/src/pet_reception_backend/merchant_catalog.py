@@ -4,18 +4,21 @@ from pathlib import Path
 from .schemas import DemoMerchant
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEMO_MERCHANT_PATH = PROJECT_ROOT / "config" / "demo-merchant.json"
+DEFAULT_DEMO_MERCHANT_PATH = PROJECT_ROOT / "config" / "demo-merchant.json"
 
 
-def _load_demo_merchant() -> DemoMerchant:
-    with DEMO_MERCHANT_PATH.open(encoding="utf-8") as merchant_file:
+def resolve_merchant_config_path(config_path: str | Path | None = None) -> Path:
+    path = Path(config_path) if config_path else DEFAULT_DEMO_MERCHANT_PATH
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def load_demo_merchant(config_path: str | Path | None = None) -> DemoMerchant:
+    merchant_path = resolve_merchant_config_path(config_path)
+    with merchant_path.open(encoding="utf-8") as merchant_file:
         return DemoMerchant.model_validate(json.load(merchant_file))
 
 
-DEMO_MERCHANT = _load_demo_merchant()
-
-
-def get_demo_merchant(merchant_id: str) -> DemoMerchant | None:
-    if merchant_id != DEMO_MERCHANT.id:
+def get_demo_merchant(merchant: DemoMerchant, merchant_id: str) -> DemoMerchant | None:
+    if merchant_id != merchant.id:
         return None
-    return DEMO_MERCHANT
+    return merchant

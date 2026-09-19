@@ -41,6 +41,8 @@ test('applies the guarded M1 greeting and server VAD compatibility hooks', () =>
   assert.match(gateway, /createdFrontend\.injectResult\([\s\S]+\[CALL_CONNECTED\][\s\S]+initialGreeting/)
   assert.match(gateway, /\{ injectContext: true \}/)
   assert.match(gateway, /!resumedFromSleep/)
+  assert.match(gateway, /createInitialGreetingRegistry\(\{\s+maxSessions:/)
+  assert.match(gateway, /initialGreetingRegistry\.claim\(ownerId, sessionId\)/)
   assert.match(provider, /PET_RECEPTION_TURN_DETECTION_TYPE/)
   assert.match(provider, /PET_RECEPTION_VAD_THRESHOLD/)
   assert.match(provider, /type: 'server_vad'/)
