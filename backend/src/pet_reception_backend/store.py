@@ -236,7 +236,28 @@ class PostgresStore:
                 }
                 for service in merchant.services
             ],
-            "scheduling": scheduling.model_dump(mode="json"),
+            "scheduling": {
+                "slot_interval_minutes": scheduling.slot_interval_minutes,
+                "candidate_limit": scheduling.candidate_limit,
+                "alternative_days": scheduling.alternative_days,
+                "service_buffers": [
+                    item.model_dump(mode="json")
+                    for item in scheduling.service_buffers
+                ],
+                "staff": [
+                    {
+                        "id": staff.id,
+                        "display_name": staff.display_name,
+                        "service_ids": staff.service_ids,
+                        "weekly_hours": [
+                            window.model_dump(mode="json")
+                            for window in staff.weekly_hours
+                        ],
+                        "source": staff.source,
+                    }
+                    for staff in scheduling.staff
+                ],
+            },
         }
         serialized = json.dumps(
             payload,
@@ -303,6 +324,8 @@ class PostgresStore:
                     id=row["id"],
                     display_name=row["display_name"],
                     service_ids=sorted(service_ids_by_staff.get(row["id"], [])),
+                    public_intro=row["public_intro"],
+                    specialties=row["specialties"] or [],
                     source=row["source"],
                 )
                 for row in staff_rows
@@ -319,6 +342,7 @@ class PostgresStore:
             services=services,
             staff=staff,
             grooming_policy=merchant_row["grooming_policy"],
+            business_hours=merchant_row["business_hours"],
         )
 
     def upsert_merchant(self, merchant: DemoMerchant) -> None:
@@ -336,6 +360,11 @@ class PostgresStore:
             "grooming_policy": (
                 merchant.grooming_policy.model_dump(mode="json")
                 if merchant.grooming_policy
+                else None
+            ),
+            "business_hours": (
+                merchant.business_hours.model_dump(mode="json")
+                if merchant.business_hours
                 else None
             ),
             "slot_interval_minutes": (
@@ -466,6 +495,8 @@ class PostgresStore:
                         merchant_id=merchant.id,
                         id=staff.id,
                         display_name=staff.display_name,
+                        public_intro=staff.public_intro,
+                        specialties=staff.specialties,
                         active=True,
                         source=staff.source,
                     )
@@ -473,6 +504,8 @@ class PostgresStore:
                         index_elements=[staff_members.c.merchant_id, staff_members.c.id],
                         set_={
                             "display_name": staff.display_name,
+                            "public_intro": staff.public_intro,
+                            "specialties": staff.specialties,
                             "active": True,
                             "source": staff.source,
                             "updated_at": func.now(),

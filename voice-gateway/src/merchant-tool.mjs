@@ -312,6 +312,7 @@ function merchantFacts(result) {
       local_date: result.merchant_local_date,
       local_datetime: result.merchant_local_datetime,
       grooming_policy: merchant.grooming_policy || null,
+      business_hours: merchant.business_hours || null,
       staff: merchant.staff || [],
       services: merchant.services.map((service) => ({
         id: service.id,
@@ -347,12 +348,20 @@ function merchantInline(result) {
   const serviceLines = merchant.services
     .map((service) => `- ${service.name_zh}：约 ${service.duration_minutes} 分钟；${service.price_note}`)
     .join('\n')
+  const businessHours = merchant.business_hours?.note
+    ? `- 营业时间：${merchant.business_hours.note}`
+    : '- 营业时间：公开资料未提供'
+  const staffLines = (merchant.staff || [])
+    .map((staff) => `- ${staff.display_name}：${staff.public_intro || '公开介绍未提供'}`)
+    .join('\n')
   return [
     `## ${merchant.display_name}`, '', `- 地址：${merchant.address}`,
     `- 电话：${merchant.phone}`, `- 时区：${merchant.time_zone}`,
     `- 商家当地日期：${result.merchant_local_date}`,
+    businessHours,
     `- 数据来源：${merchant.source}`, '- 资料边界：演示资料和参考价格，不是正式报价',
     '', serviceLines,
+    ...(staffLines ? ['', '### 服务人员', staffLines] : []),
   ].join('\n')
 }
 
@@ -368,7 +377,21 @@ function publicDraft(result) {
 
 function publicAvailability(result) {
   const { draft_id, ...search } = result.search
-  return { status: 'ok', search }
+  const nextAction = search.status === 'no_availability'
+    ? {
+        type: 'select_alternative_date',
+        instruction: '用户选择替代日期后，必须先调用 update_booking_draft 写入 preferred_date，并设置 search_availability_after_update=true；成功返回具体 candidates 前不得声称已有具体时段。',
+      }
+    : search.candidates?.length
+      ? {
+          type: 'select_returned_candidate',
+          instruction: '只能从本次 candidates 中选择；向客户播报当地时间，不朗读 candidate_id。',
+        }
+      : {
+          type: 'stop_and_explain',
+          instruction: '当前没有可选择的具体候选，不得调用 prepare_booking。',
+        }
+  return { status: 'ok', search, next_action: nextAction }
 }
 
 function publicOperation(result) {
@@ -578,6 +601,7 @@ export class MerchantCoordinator {
     this.presentationWrites = new Map()
     this.operations = new Map()
     this.completedSessions = new Map()
+    this.currentAvailability = new Map()
   }
 
   async run(_input, options = {}) {
@@ -669,6 +693,7 @@ export class MerchantCoordinator {
   }
 
   async executeBusinessTool(toolName, args, context) {
+    const sessionKey = `${context.ownerId}\u0000${context.sessionId}`
     if (toolName === 'get_merchant_info') {
       return { output: merchantFacts(await this.toolClient.getMerchantInfo(context)) }
     }
@@ -680,6 +705,21 @@ export class MerchantCoordinator {
         draftPatch(args, current.draft.version),
       )
       const output = publicDraft(updated)
+      if ((updated.changed_fields || []).some((field) => (
+        [
+          'service_id',
+          'preferred_date',
+          'preferred_time_of_day',
+          'staff_preference_text',
+          'staff_id',
+        ].includes(field)
+      ))) {
+        boundedMapSet(this.currentAvailability, sessionKey, {
+          status: 'needs_search',
+          candidates: [],
+          preferred_date: updated.draft.preferred_date,
+        })
+      }
       if (args.search_availability_after_update === true) {
         if (updated.missing_for_availability?.length) {
           output.follow_up = {
@@ -692,7 +732,10 @@ export class MerchantCoordinator {
             const availability = await this.toolClient.searchAvailability(context, {
               expected_availability_revision: updated.draft.availability_revision,
             })
-            output.availability = publicAvailability(availability).search
+            const publicResult = publicAvailability(availability)
+            output.availability = publicResult.search
+            output.next_action = publicResult.next_action
+            boundedMapSet(this.currentAvailability, sessionKey, publicResult.search)
           } catch (error) {
             if (error?.code === 'stale_business_turn') throw error
             output.follow_up = {
@@ -713,14 +756,44 @@ export class MerchantCoordinator {
       const result = await this.toolClient.searchAvailability(context, {
         expected_availability_revision: current.draft.availability_revision,
       })
-      return { output: publicAvailability(result) }
+      const output = publicAvailability(result)
+      boundedMapSet(this.currentAvailability, sessionKey, output.search)
+      return { output }
     }
     if (toolName === 'prepare_booking') {
+      const latest = this.currentAvailability.get(sessionKey)
+      const candidateId = String(args.candidate_id || '')
+      if (latest) {
+        const matchingCandidate = (latest.candidates || []).find(
+          (candidate) => String(candidate.id) === candidateId,
+        )
+        if (!matchingCandidate) {
+          const hasCandidates = Boolean(latest.candidates?.length)
+          return {
+            output: {
+              status: 'needs_availability_selection',
+              error: true,
+              error_code: hasCandidates
+                ? 'candidate_not_in_current_results'
+                : 'specific_availability_not_queried',
+              user_message: hasCandidates
+                ? '这个时间不是当前排班结果中的可选时段，请从刚刚返回的具体时间中重新选择。'
+                : '当前还没有查询到所选日期的具体可用时段，请先更新日期并重新查询排班。',
+              retryable: false,
+              recovery: {
+                action: hasCandidates
+                  ? 'ask_user_to_select_current_candidate'
+                  : 'update_date_and_search_availability',
+              },
+            },
+          }
+        }
+      }
       const current = await this.toolClient.getBookingDraft(context)
       requireActiveTurn(context)
       const result = await this.toolClient.prepareBooking(context, {
         expected_version: current.draft.version,
-        candidate_id: String(args.candidate_id || ''),
+        candidate_id: candidateId,
       })
       const preparation = result.preparation
       const presentation = {

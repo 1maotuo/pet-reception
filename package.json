@@ -15,6 +15,7 @@
     "dev:web": "npm run dev --workspace @pet-reception/web",
     "dev:voice": "npm run dev --workspace @pet-reception/voice-gateway",
     "build:web": "npm run build --workspace @pet-reception/web",
+    "report:voice-latency": "node scripts/report-voice-latency.mjs",
     "test:web": "npm run test --workspace @pet-reception/web",
     "test:voice": "npm run test --workspace @pet-reception/voice-gateway",
     "test": "npm run test:web && npm run test:voice"

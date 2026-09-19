@@ -88,12 +88,16 @@ def test_merchant_exposes_only_real_seeded_staff(environment) -> None:
             "id": "demo-staff-lisa",
             "display_name": "Lisa",
             "service_ids": ["demo-bath", "demo-full-groom"],
+            "public_intro": "Lisa 是演示门店的犬类美容师，可提供基础洗护和全套美容。",
+            "specialties": ["犬类基础洗护", "犬类修剪造型"],
             "source": "m2-demo-schedule:demo-staff-lisa",
         },
         {
             "id": "demo-staff-marco",
             "display_name": "Marco",
             "service_ids": ["demo-bath"],
+            "public_intro": "Marco 是演示门店的犬类洗护人员，目前开放基础洗护服务。",
+            "specialties": ["犬类基础洗护"],
             "source": "m2-demo-schedule:demo-staff-marco",
         },
     ]

@@ -44,12 +44,61 @@ class GroomingPolicy(BaseModel):
     staff_assessment_required_for: list[str] = Field(default_factory=list)
     recommendation_boundary: str
     medical_boundary: str
+    minimum_age_note: str | None = None
+    vaccination_note: str | None = None
+    arrival_note: str | None = None
+    late_arrival_note: str | None = None
+    aggression_policy: str | None = None
+    price_confirmation_policy: str | None = None
+
+
+class PublicBusinessHoursWindow(BaseModel):
+    weekday: int = Field(ge=0, le=6)
+    opens_at: time
+    closes_at: time
+
+    @model_validator(mode="after")
+    def require_forward_window(self) -> "PublicBusinessHoursWindow":
+        if self.opens_at.tzinfo is not None or self.closes_at.tzinfo is not None:
+            raise ValueError("business hour times must be local wall times without offsets")
+        if self.opens_at >= self.closes_at:
+            raise ValueError("business hour opens_at must be before closes_at")
+        return self
+
+
+class MerchantBusinessHours(BaseModel):
+    weekly_hours: list[PublicBusinessHoursWindow] = Field(min_length=1)
+    closed_weekdays: list[int] = Field(default_factory=list)
+    note: str
+    source: str
+
+    @model_validator(mode="after")
+    def require_consistent_weekdays(self) -> "MerchantBusinessHours":
+        closed = set(self.closed_weekdays)
+        if len(closed) != len(self.closed_weekdays):
+            raise ValueError("closed_weekdays must be unique")
+        if any(day < 0 or day > 6 for day in closed):
+            raise ValueError("closed weekdays must be between 0 and 6")
+        open_days = {window.weekday for window in self.weekly_hours}
+        if open_days.intersection(closed):
+            raise ValueError("a weekday cannot be both open and closed")
+        by_weekday: dict[int, list[PublicBusinessHoursWindow]] = {}
+        for window in self.weekly_hours:
+            by_weekday.setdefault(window.weekday, []).append(window)
+        for windows in by_weekday.values():
+            ordered = sorted(windows, key=lambda item: item.opens_at)
+            for previous, current in zip(ordered, ordered[1:]):
+                if current.opens_at < previous.closes_at:
+                    raise ValueError("business hour windows must not overlap")
+        return self
 
 
 class MerchantStaff(BaseModel):
     id: str
     display_name: str
     service_ids: list[str]
+    public_intro: str | None = None
+    specialties: list[str] = Field(default_factory=list)
     source: str
 
 
@@ -63,6 +112,7 @@ class DemoMerchant(BaseModel):
     services: list[MerchantService]
     staff: list[MerchantStaff] = Field(default_factory=list)
     grooming_policy: GroomingPolicy | None = None
+    business_hours: MerchantBusinessHours | None = None
     is_demo: Literal[True] = True
     source: str
 
@@ -100,6 +150,8 @@ class StaffSeed(BaseModel):
     id: str
     display_name: str
     service_ids: list[str] = Field(min_length=1)
+    public_intro: str | None = None
+    specialties: list[str] = Field(default_factory=list)
     weekly_hours: list[WeeklyWindowSeed] = Field(min_length=1)
     source: str
 

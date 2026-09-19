@@ -26,6 +26,20 @@ test('merchant tool sends server-bound merchant and gateway session context', as
         phone: '+1-415-555-0142',
         time_zone: 'America/Los_Angeles',
         source: 'm1-static-demo-catalog:demo-grooming-001',
+        business_hours: {
+          weekly_hours: [{ weekday: 0, opens_at: '09:00:00', closes_at: '17:00:00' }],
+          closed_weekdays: [6],
+          note: '周一至周六上午 9 点至下午 5 点',
+          source: 'test:hours',
+        },
+        staff: [{
+          id: 'demo-staff-lisa',
+          display_name: 'Lisa',
+          service_ids: ['demo-bath'],
+          public_intro: '犬类洗护人员',
+          specialties: ['犬类基础洗护'],
+          source: 'test:lisa',
+        }],
         services: [{
           id: 'demo-bath',
           name_zh: '基础洗护',
@@ -77,11 +91,15 @@ test('merchant tool sends server-bound merchant and gateway session context', as
     assert.equal(facts.merchant.services[0].price_note, '$55 起')
     assert.deepEqual(facts.merchant.services[0].supported_species, ['犬'])
     assert.equal(facts.merchant.local_date, '2026-09-19')
+    assert.match(facts.merchant.business_hours.note, /下午 5 点/)
+    assert.deepEqual(facts.merchant.staff[0].specialties, ['犬类基础洗护'])
     assert.match(facts.relative_date_rule, /merchant\.local_date/)
     assert.equal(facts.availability_checked, false)
     assert.equal(facts.booking_created, false)
     assert.match(result.metadata.presentation.inline.content, /资料边界/)
     assert.match(result.metadata.presentation.inline.content, /约 60 分钟/)
+    assert.match(result.metadata.presentation.inline.content, /营业时间/)
+    assert.match(result.metadata.presentation.inline.content, /Lisa/)
     assert.equal(result.metadata.source, 'm1-static-demo-catalog:demo-grooming-001')
   } finally {
     await backend.close()

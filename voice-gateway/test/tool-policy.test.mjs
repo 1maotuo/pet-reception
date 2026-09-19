@@ -44,6 +44,8 @@ test('actual Qwen session exposes only the six bounded M4 business tools', async
     update.function.parameters.properties.search_availability_after_update.type,
     'boolean',
   )
+  assert.equal(update.function.parameters.properties.pet_age_months.type, 'integer')
+  assert.match(update.function.description, /用户选择替代日期/)
   const merchantInfo = session.tools.find((tool) => tool.function.name === 'get_merchant_info')
   assert.match(merchantInfo.function.description, /商家当地日期/)
   assert.match(merchantInfo.function.description, /推荐边界/)

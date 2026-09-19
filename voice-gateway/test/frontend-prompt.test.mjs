@@ -66,4 +66,8 @@ test('renders a store-specific M4 booking front desk prompt from trusted configu
   assert.match(instructions, /`booking_already_submitted` 表示当前会话已经有预约/)
   assert.match(instructions, /点击网页\s*“开始新预约”/)
   assert.match(instructions, /本阶段暂缓无日期搜索/)
+  assert.match(instructions, /替代日期只表示那天可能有空/)
+  assert.match(instructions, /不能停在“稍等”/)
+  assert.match(instructions, /不要承诺未经监控证实/)
+  assert.match(instructions, /宠物名字属于身份字段/)
 })

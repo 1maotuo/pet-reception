@@ -576,6 +576,23 @@ def add_m4_session_and_age_contract(connection: Connection) -> None:
             "ADD COLUMN IF NOT EXISTS pet_age_text VARCHAR(80)"
         )
     )
+
+
+def add_m4_public_merchant_profile(connection: Connection) -> None:
+    """Expose public hours and bounded staff facts separately from scheduling internals."""
+    connection.execute(
+        text(
+            "ALTER TABLE merchants "
+            "ADD COLUMN IF NOT EXISTS business_hours JSONB"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE staff_members "
+            "ADD COLUMN IF NOT EXISTS public_intro TEXT, "
+            "ADD COLUMN IF NOT EXISTS specialties JSONB NOT NULL DEFAULT '[]'::jsonb"
+        )
+    )
     connection.execute(
         text(
             "ALTER TABLE bookings "
@@ -603,6 +620,7 @@ MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0006_m3_simulated_payment", add_m3_simulated_payment),
     ("0007_m4_grooming_catalog", add_m4_grooming_catalog),
     ("0008_m4_session_and_age_contract", add_m4_session_and_age_contract),
+    ("0009_m4_public_merchant_profile", add_m4_public_merchant_profile),
 )
 
 

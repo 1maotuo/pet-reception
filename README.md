@@ -55,6 +55,11 @@ backend\.venv\Scripts\python.exe -m pip install -e backend --no-deps
 才会写入数据库。当前文件明确是演示数据，只支持犬；任何打结先由店员评估，不能由模型凭行业常识
 扩展成猫服务、医疗处理或承诺一定能处理打结。
 
+`business_hours` 是可向客户公开的门店营业时间，和用于计算候选的员工 `weekly_hours` 分开；不能
+拿某位员工的工作窗口推断门店闭店时间。员工可配置 `public_intro` 与 `specialties`，只用于公开
+介绍，真正能否承接某项服务仍以 `service_ids` 和实时排班为准。年龄、疫苗、到店、迟到、攻击风险
+和价格确认规则保存在结构化 `grooming_policy` 中；当前值均明确标记为演示商家资料。
+
 ## 启动
 
 先启动数据库：
@@ -112,6 +117,24 @@ npm run dev:voice
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8010/health
 Invoke-RestMethod http://127.0.0.1:3101/api/health
+```
+
+语音网关会记录不含客户原话、姓名、电话和工具参数的耗时事件：`voice_turn.input_ended`、
+`voice_turn.response_started`、`voice_turn.first_audio`、`voice_turn.response_done` 以及
+`business_tool.started/completed/failed/ignored`。工具终态包含实际 `durationMs`；完整轮次包含
+从用户停说到响应阶段的 `sinceInputEndMs`。这些数据用于形成真实样本后的 P50/P95，当前 5 秒
+HTTP 超时只是失败边界，不是对客户承诺的响应时间。实时查看本地日志：
+
+```powershell
+Get-Content logs\voice-current.stdout.log -Wait |
+  Select-String 'voice_turn\.|business_tool\.'
+```
+
+完成若干次真实通话后，用固定 Node 24 环境汇总每种工具与完整轮次的样本数、最小值、P50、P95
+和最大值；没有样本时命令会明确返回 `no_samples`，不会生成一个看似准确的承诺：
+
+```powershell
+npm run report:voice-latency
 ```
 
 真实商家工具探针要求 FastAPI 正在运行，并使用 `.env` 中的服务令牌：

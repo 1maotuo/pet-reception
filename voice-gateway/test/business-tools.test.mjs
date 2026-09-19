@@ -421,6 +421,109 @@ test('a saved draft remains truthful when the chained availability read fails', 
   })
 })
 
+test('alternative-date results require a concrete re-query before prepare', async () => {
+  let prepareCalls = 0
+  const coordinator = new MerchantCoordinator({
+    toolClient: {
+      getBookingDraft: async () => ({ draft: draft() }),
+      searchAvailability: async () => ({
+        search: {
+          status: 'no_availability',
+          preferred_date: '2026-09-20',
+          candidates: [],
+          alternative_dates: [{ date: '2026-09-22' }],
+        },
+      }),
+      prepareBooking: async () => {
+        prepareCalls += 1
+        return preparationResult()
+      },
+    },
+  })
+
+  const searched = await coordinator.runBusinessTool('search_availability', {}, context)
+  assert.equal(searched.output.next_action.type, 'select_alternative_date')
+  const prepared = await coordinator.runBusinessTool(
+    'prepare_booking',
+    { candidate_id: 'invented-candidate' },
+    context,
+  )
+
+  assert.equal(prepared.output.status, 'needs_availability_selection')
+  assert.equal(prepared.output.error_code, 'specific_availability_not_queried')
+  assert.equal(prepareCalls, 0)
+})
+
+test('prepare accepts only a candidate from the current concrete search', async () => {
+  let prepareCalls = 0
+  const candidateId = '33333333-3333-4333-8333-333333333333'
+  const coordinator = new MerchantCoordinator({
+    toolClient: {
+      getBookingDraft: async () => ({ draft: draft() }),
+      searchAvailability: async () => ({
+        search: {
+          status: 'available',
+          preferred_date: '2026-10-06',
+          candidates: [{ id: candidateId }],
+          alternative_dates: [],
+        },
+      }),
+      prepareBooking: async () => {
+        prepareCalls += 1
+        return preparationResult()
+      },
+    },
+  })
+
+  await coordinator.runBusinessTool('search_availability', {}, context)
+  const rejected = await coordinator.runBusinessTool(
+    'prepare_booking',
+    { candidate_id: '44444444-4444-4444-8444-444444444444' },
+    context,
+  )
+  assert.equal(rejected.output.error_code, 'candidate_not_in_current_results')
+  const prepared = await coordinator.runBusinessTool(
+    'prepare_booking',
+    { candidate_id: candidateId },
+    { ...context, invocationId: 'prepare-current-candidate' },
+  )
+  assert.equal(prepared.output.status, 'prepared')
+  assert.equal(prepareCalls, 1)
+})
+
+test('changing the date without re-querying blocks preparation at the gateway', async () => {
+  let prepareCalls = 0
+  const coordinator = new MerchantCoordinator({
+    toolClient: {
+      getBookingDraft: async () => ({ draft: draft() }),
+      updateBookingDraft: async () => ({
+        draft: draft({ version: 3, preferred_date: '2026-10-07' }),
+        changed_fields: ['preferred_date'],
+        missing_for_availability: [],
+        missing_for_booking: ['selected_availability'],
+      }),
+      prepareBooking: async () => {
+        prepareCalls += 1
+        return preparationResult()
+      },
+    },
+  })
+
+  await coordinator.runBusinessTool(
+    'update_booking_draft',
+    { preferred_date: '2026-10-07' },
+    context,
+  )
+  const prepared = await coordinator.runBusinessTool(
+    'prepare_booking',
+    { candidate_id: 'invented-after-date-change' },
+    context,
+  )
+
+  assert.equal(prepared.output.error_code, 'specific_availability_not_queried')
+  assert.equal(prepareCalls, 0)
+})
+
 test('a confirmed draft failure blocks repeated prepare until a new session is used', async () => {
   let draftReads = 0
   const terminal = new Error('already submitted')
@@ -759,6 +862,65 @@ test('a stale business failure is silent just like a stale success', async () =>
   assert.equal(outputs.length, 1)
   assert.equal(outputs[0][0].status, 'ignored_after_interruption')
   assert.equal(outputs[0][1].createResponse, false)
+})
+
+test('a spoken wait preamble still receives one post-tool continuation with timing', async () => {
+  process.env.PET_RECEPTION_FRONTEND_TOOL_ALLOWLIST = 'search_availability'
+  const require = createRequire(import.meta.url)
+  const qwenRoot = dirname(require.resolve('qwen-audio-agent/package.json'))
+  const { ToolCallHandler } = await import(pathToFileURL(resolve(
+    qwenRoot,
+    'server',
+    'src',
+    'voice',
+    'tools',
+    'tool-call-handler.mjs',
+  )))
+  const outputs = []
+  const events = []
+  let continuations = 0
+  const handler = new ToolCallHandler({
+    taskManager: {},
+    ownerId: context.ownerId,
+    sessionId: context.sessionId,
+    transcripts: {},
+    getFrontend: () => ({
+      sendFunctionOutput: async (_callId, output, _context, options) => {
+        outputs.push([output, options])
+      },
+      ensureResponse: async () => { continuations += 1 },
+    }),
+    getTurnId: () => 'turn-wait',
+    getTurnGeneration: () => 5,
+    onBusinessToolEvent: (event) => events.push(event),
+    coordinator: {
+      runBusinessTool: async () => ({
+        output: { status: 'ok', search: { status: 'available', candidates: [] } },
+      }),
+    },
+  })
+
+  await handler.handle({
+    call_id: 'call-wait',
+    name: 'search_availability',
+    arguments: JSON.stringify({ contact_phone: '123456789' }),
+  }, {
+    turnId: 'turn-wait',
+    turnGeneration: 5,
+    responseId: 'response-with-spoken-wait',
+  })
+  assert.equal(continuations, 0)
+
+  await handler.finishToolResponse(
+    'response-with-spoken-wait',
+    { suppressResponse: true },
+  )
+
+  assert.equal(continuations, 1)
+  assert.equal(outputs[0][1].createResponse, false)
+  assert.deepEqual(events.map((event) => event.phase), ['started', 'completed'])
+  assert.equal(Number.isInteger(events[1].durationMs), true)
+  assert.equal(JSON.stringify(events).includes('123456789'), false)
 })
 
 test('an interrupted summary confirmation replays through the controlled speak path', async () => {

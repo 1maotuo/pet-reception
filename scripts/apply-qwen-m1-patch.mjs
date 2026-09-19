@@ -178,6 +178,55 @@ export function applyQwenM1Patch(packageRoot) {
     },
   ])
 
+  const applyM4VisualToolStatePatch = () => patchFile(
+    resolve(packageRoot, 'server', 'src', 'voice', 'realtime-gateway.mjs'), [
+    {
+      label: 'M4 track in-flight business tools for truthful visual state',
+      alreadyApplied: `let businessToolsInFlight = 0`,
+      original: `    let inputEnabled = false
+    let outputEnabled = false`,
+      replacement: `    let inputEnabled = false
+    let outputEnabled = false
+    let businessToolsInFlight = 0`,
+    },
+    {
+      label: 'M4 update in-flight count from terminal business tool events',
+      alreadyApplied: `businessToolsInFlight + (event.phase === 'started' ? 1 : -1)`,
+      original: `      onBusinessToolEvent: event => {
+        connectionLogger.info(\`business_tool.\${event.phase}\`, event)`,
+      replacement: `      onBusinessToolEvent: event => {
+        businessToolsInFlight = Math.max(
+          0,
+          businessToolsInFlight + (event.phase === 'started' ? 1 : -1),
+        )
+        connectionLogger.info(\`business_tool.\${event.phase}\`, event)`,
+    },
+    {
+      label: 'M4 keep browser processing while a spoken-wait tool is running',
+      alreadyApplied: `state: businessToolsInFlight > 0 ? 'processing' : userSpeaking ? 'listening' : 'idle'`,
+      original: `        if (responseContexts.get(id) === context) {
+          scheduleResponseContextCleanup(id, context)
+        }
+      }
+      send(ws, {
+        type: 'voice.state',
+        state: userSpeaking ? 'listening' : 'idle',
+        turnId: userSpeaking ? turnId : playbackTurnId,
+        origin: context?.origin || 'model',
+      })`,
+      replacement: `        if (responseContexts.get(id) === context) {
+          scheduleResponseContextCleanup(id, context)
+        }
+      }
+      send(ws, {
+        type: 'voice.state',
+        state: businessToolsInFlight > 0 ? 'processing' : userSpeaking ? 'listening' : 'idle',
+        turnId: userSpeaking ? turnId : playbackTurnId,
+        origin: context?.origin || 'model',
+      })`,
+    },
+  ])
+
   patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'realtime-gateway.mjs'), [
     {
       label: 'inject initial greeting into the fresh conversation',
@@ -339,6 +388,7 @@ export function frontendTools(agentContext = {}) {
   pet_species: { type: 'string', description: '宠物种类，例如犬或猫。' },
   pet_breed: { type: 'string', description: '宠物品种；不确定时不要猜。' },
   pet_age_years: { type: 'number', minimum: 0, maximum: 50, description: '仅兼容已经明确以年表示的年龄；不要把月龄换算为小数年。' },
+  pet_age_months: { type: 'integer', minimum: 0, maximum: 600, description: '明确月龄的整数值；有年龄原文时优先传 pet_age_text。' },
   pet_age_text: { type: 'string', description: '用户明确说出的年龄原文，例如“四个月”或“6岁”；优先用于幼宠月龄。' },
   pet_care_notes: { type: 'string', description: '护理注意事项，忠实保留用户说法，不作医疗推断。' },
   need_description: { type: 'string', description: '本次服务需求描述。' },
@@ -347,8 +397,8 @@ export function frontendTools(agentContext = {}) {
   preferred_time_of_day: { type: 'string', enum: ['morning', 'afternoon', 'evening', 'flexible'], description: '上午、下午、晚上或时间灵活。' },
   staff_preference_text: { type: 'string', description: '用户原话中的员工偏好。' },
   staff_id: { type: 'string', description: '只能使用 get_merchant_info 返回的员工 ID。' },
-  clear_fields: { type: 'array', items: { type: 'string', enum: ['customer_name', 'contact_phone', 'pet_name', 'pet_species', 'pet_breed', 'pet_age_years', 'pet_age_text', 'pet_care_notes', 'need_description', 'service_id', 'preferred_date', 'preferred_time_of_day', 'staff_preference_text', 'staff_id'] }, uniqueItems: true, description: '仅在用户明确撤销或纠正字段时使用。' },
-  search_availability_after_update: { type: 'boolean', description: '仅当用户在本轮明确要求查询时间时设为 true；网关将在批量更新成功后立即查询，避免额外等待轮次。' },
+  clear_fields: { type: 'array', items: { type: 'string', enum: ['customer_name', 'contact_phone', 'pet_name', 'pet_species', 'pet_breed', 'pet_age_years', 'pet_age_months', 'pet_age_text', 'pet_care_notes', 'need_description', 'service_id', 'preferred_date', 'preferred_time_of_day', 'staff_preference_text', 'staff_id'] }, uniqueItems: true, description: '仅在用户明确撤销或纠正字段时使用。' },
+  search_availability_after_update: { type: 'boolean', description: '用户要求查询时间，或从替代日期中选定一天时设为 true；网关将在批量更新成功后立即查询具体候选，避免额外等待轮次。' },
 }
 
 const PET_RECEPTION_BUSINESS_TOOLS = [
@@ -364,7 +414,7 @@ const PET_RECEPTION_BUSINESS_TOOLS = [
     type: 'function',
     function: {
       name: 'update_booking_draft',
-      description: '把用户在当前或最近对话中明确提供的预约信息一次批量写入当前会话草稿。不要猜测，不要重复写入未变化信息。此操作不创建预约。',
+      description: '把用户在当前或最近对话中明确提供的预约信息一次批量写入当前会话草稿。用户选择替代日期时必须同时写 preferred_date 并设置 search_availability_after_update=true，得到具体候选前不能声称该日时段已查到。不要猜测，不要重复写入未变化信息。此操作不创建预约。',
       parameters: { type: 'object', properties: PET_RECEPTION_DRAFT_PROPERTIES, additionalProperties: false },
     },
   },
@@ -416,6 +466,36 @@ export const TOOLS = [`,
     },
   ])
 
+  patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'frontend-tools.mjs'), [
+    {
+      label: 'M4 expose exact integer month age to the model tool schema',
+      alreadyApplied: `pet_age_months: { type: 'integer'`,
+      original: `  pet_age_years: { type: 'number', minimum: 0, maximum: 50, description: '仅兼容已经明确以年表示的年龄；不要把月龄换算为小数年。' },
+  pet_age_text:`,
+      replacement: `  pet_age_years: { type: 'number', minimum: 0, maximum: 50, description: '仅兼容已经明确以年表示的年龄；不要把月龄换算为小数年。' },
+  pet_age_months: { type: 'integer', minimum: 0, maximum: 600, description: '明确月龄的整数值；有年龄原文时优先传 pet_age_text。' },
+  pet_age_text:`,
+    },
+    {
+      label: 'M4 include month age in clearable fields',
+      alreadyApplied: `'pet_age_years', 'pet_age_months', 'pet_age_text'`,
+      original: `'pet_age_years', 'pet_age_text'`,
+      replacement: `'pet_age_years', 'pet_age_months', 'pet_age_text'`,
+    },
+    {
+      label: 'M4 make alternative-date update-and-search explicit in tool schema',
+      alreadyApplied: `用户选择替代日期时必须同时写 preferred_date`,
+      original: `description: '把用户在当前或最近对话中明确提供的预约信息一次批量写入当前会话草稿。不要猜测，不要重复写入未变化信息。此操作不创建预约。'`,
+      replacement: `description: '把用户在当前或最近对话中明确提供的预约信息一次批量写入当前会话草稿。用户选择替代日期时必须同时写 preferred_date 并设置 search_availability_after_update=true，得到具体候选前不能声称该日时段已查到。不要猜测，不要重复写入未变化信息。此操作不创建预约。'`,
+    },
+    {
+      label: 'M4 make chained search flag cover alternative date selection',
+      alreadyApplied: `用户要求查询时间，或从替代日期中选定一天时设为 true`,
+      original: `仅当用户在本轮明确要求查询时间时设为 true；网关将在批量更新成功后立即查询，避免额外等待轮次。`,
+      replacement: `用户要求查询时间，或从替代日期中选定一天时设为 true；网关将在批量更新成功后立即查询具体候选，避免额外等待轮次。`,
+    },
+  ])
+
   patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'tools', 'tool-call-handler.mjs'), [
     {
       label: 'runtime enforcement for the M1 frontend tool allowlist',
@@ -456,6 +536,179 @@ function configuredPetReceptionToolAllowlist() {
     }
 
     if (toolName === GET_CURRENT_TIME_TOOL_NAME) {`,
+    },
+  ])
+
+  const applyM4TelemetryPatch = () => patchFile(
+    resolve(packageRoot, 'server', 'src', 'voice', 'tools', 'tool-call-handler.mjs'), [
+    {
+      label: 'M4 business tool telemetry callback',
+      alreadyApplied: `onBusinessToolEvent = () => {},`,
+      original: `    sendClientEvent = () => {},
+    inputAssets = null,`,
+      replacement: `    sendClientEvent = () => {},
+    onBusinessToolEvent = () => {},
+    inputAssets = null,`,
+    },
+    {
+      label: 'store M4 business tool telemetry callback',
+      alreadyApplied: `this.onBusinessToolEvent = onBusinessToolEvent`,
+      original: `    this.sendClientEvent = sendClientEvent
+    this.inputAssets = inputAssets`,
+      replacement: `    this.sendClientEvent = sendClientEvent
+    this.onBusinessToolEvent = onBusinessToolEvent
+    this.inputAssets = inputAssets`,
+    },
+    {
+      label: 'M4 business tools require a post-result continuation after spoken preambles',
+      alreadyApplied: `forceContinuation = false`,
+      original: `  beginDeferredToolResponse(responseId, { turnId, turnGeneration } = {}) {
+    const key = String(responseId || '')
+    if (!key) return null
+    const batch = this.deferredToolResponses.get(key) || {
+      pending: 0,
+      sourceDone: false,
+      failed: false,
+      suppressResponse: false,
+      turnId,
+      turnGeneration,
+    }
+    if (!this.deferredToolResponses.has(key) && this.deferredToolResponses.size >= 100) {
+      this.deferredToolResponses.delete(this.deferredToolResponses.keys().next().value)
+    }
+    batch.pending += 1`,
+      replacement: `  beginDeferredToolResponse(responseId, {
+    turnId,
+    turnGeneration,
+    forceContinuation = false,
+  } = {}) {
+    const key = String(responseId || '')
+    if (!key) return null
+    const batch = this.deferredToolResponses.get(key) || {
+      pending: 0,
+      sourceDone: false,
+      failed: false,
+      suppressResponse: false,
+      forceContinuation: false,
+      turnId,
+      turnGeneration,
+    }
+    if (!this.deferredToolResponses.has(key) && this.deferredToolResponses.size >= 100) {
+      this.deferredToolResponses.delete(this.deferredToolResponses.keys().next().value)
+    }
+    batch.forceContinuation ||= forceContinuation
+    batch.pending += 1`,
+    },
+    {
+      label: 'M4 spoken preamble cannot suppress the business result continuation',
+      alreadyApplied: `batch.suppressResponse && !batch.forceContinuation`,
+      original: `    if (batch.suppressResponse) return
+    await this.getFrontend()?.ensureResponse?.({`,
+      replacement: `    if (batch.suppressResponse && !batch.forceContinuation) return
+    await this.getFrontend()?.ensureResponse?.({`,
+    },
+    {
+      label: 'M4 mark business batches as requiring continuation',
+      alreadyApplied: `forceContinuation: true,`,
+      original: `    const deferred = this.beginDeferredToolResponse(responseId, {
+      turnId,
+      turnGeneration: generation,
+    })`,
+      replacement: `    const deferred = this.beginDeferredToolResponse(responseId, {
+      turnId,
+      turnGeneration: generation,
+      forceContinuation: true,
+    })`,
+    },
+    {
+      label: 'M4 business tool telemetry lifecycle',
+      alreadyApplied: `this.emitBusinessToolEvent({ phase: 'started'`,
+      original: `  async handlePetReceptionBusinessTool({
+    callId,
+    toolName,
+    args,
+    turnId,
+    generation,
+    responseId,
+  }) {
+    const deferred = this.beginDeferredToolResponse(responseId, {`,
+      replacement: `  emitBusinessToolEvent(event) {
+    try {
+      this.onBusinessToolEvent(event)
+    } catch {
+      // Telemetry must never change a booking result.
+    }
+  }
+
+  async handlePetReceptionBusinessTool({
+    callId,
+    toolName,
+    args,
+    turnId,
+    generation,
+    responseId,
+  }) {
+    const startedAt = Date.now()
+    const finishTelemetry = (phase, fields = {}) => this.emitBusinessToolEvent({
+      phase,
+      toolName,
+      callId,
+      turnId,
+      durationMs: Math.max(0, Date.now() - startedAt),
+      ...fields,
+    })
+    this.emitBusinessToolEvent({ phase: 'started', toolName, callId, turnId })
+    const deferred = this.beginDeferredToolResponse(responseId, {`,
+    },
+    {
+      label: 'M4 record interrupted business tool completion',
+      alreadyApplied: `finishTelemetry('ignored', { status: result.output?.status || 'completed_after_interruption' })`,
+      original: `        await this.completeDeferredToolResponse(deferred, { failed: true })
+        return
+      }
+      if (deferred) {`,
+      replacement: `        finishTelemetry('ignored', { status: result.output?.status || 'completed_after_interruption' })
+        await this.completeDeferredToolResponse(deferred, { failed: true })
+        return
+      }
+      if (deferred) {`,
+    },
+    {
+      label: 'M4 record successful business tool completion',
+      alreadyApplied: `finishTelemetry('completed', { status: result.output?.status || 'ok' })`,
+      original: `      await this.completeDeferredToolResponse(deferred)
+    } catch (error) {`,
+      replacement: `      finishTelemetry('completed', { status: result.output?.status || 'ok' })
+      await this.completeDeferredToolResponse(deferred)
+    } catch (error) {`,
+    },
+    {
+      label: 'M4 record stale business tool failure',
+      alreadyApplied: `finishTelemetry('ignored', { errorCode: error?.code || 'completed_after_interruption' })`,
+      original: `        await this.completeDeferredToolResponse(deferred, { failed: true })
+        return
+      }
+      const detail = error?.detail`,
+      replacement: `        finishTelemetry('ignored', { errorCode: error?.code || 'completed_after_interruption' })
+        await this.completeDeferredToolResponse(deferred, { failed: true })
+        return
+      }
+      const detail = error?.detail`,
+    },
+    {
+      label: 'M4 record business tool failure before continuation',
+      alreadyApplied: `finishTelemetry('failed', { errorCode: error?.code || detail?.code || 'business_tool_failed' })`,
+      original: `      await this.completeDeferredToolResponse(deferred)
+    }
+  }
+
+  async handle(event, callContext = {}) {`,
+      replacement: `      finishTelemetry('failed', { errorCode: error?.code || detail?.code || 'business_tool_failed' })
+      await this.completeDeferredToolResponse(deferred)
+    }
+  }
+
+  async handle(event, callContext = {}) {`,
     },
   ])
 
@@ -785,6 +1038,8 @@ function mergeInputParts(...groups) {`,
     },
   ])
 
+  applyM4TelemetryPatch()
+
   patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'response-context.mjs'), [
     {
       label: 'carry trusted M4 presentation reference through response correlation',
@@ -919,6 +1174,134 @@ export function ensureResponseContext(contexts, id, fallback = {}) {`,
       original: `      requestClientState: state => {`,
       replacement: `      sendClientEvent: event => send(ws, event),
       requestClientState: state => {`,
+    },
+    {
+      label: 'log and forward privacy-safe M4 business tool timing',
+      alreadyApplied: `onBusinessToolEvent: event => {`,
+      original: `      sendClientEvent: event => send(ws, event),
+      requestClientState: state => {`,
+      replacement: `      sendClientEvent: event => send(ws, event),
+      onBusinessToolEvent: event => {
+        connectionLogger.info(\`business_tool.\${event.phase}\`, event)
+        send(ws, { type: 'business.tool.status', ...event })
+      },
+      requestClientState: state => {`,
+    },
+  ])
+
+  applyM4VisualToolStatePatch()
+
+  patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'realtime-gateway.mjs'), [
+    {
+      label: 'M4 keep privacy-safe per-turn timing state',
+      alreadyApplied: `const turnTimings = new Map()`,
+      original: `    const responseContexts = new Map()
+    const inputTurns = new TurnCorrelation()`,
+      replacement: `    const responseContexts = new Map()
+    const turnTimings = new Map()
+    const rememberTurnInputEnded = current => {
+      const currentTurnId = current?.turnId
+      if (!currentTurnId || turnTimings.has(currentTurnId)) return
+      while (turnTimings.size >= 200) {
+        turnTimings.delete(turnTimings.keys().next().value)
+      }
+      turnTimings.set(currentTurnId, { inputEndedAt: Date.now() })
+      connectionLogger.info('voice_turn.input_ended', { turnId: currentTurnId })
+    }
+    const elapsedSinceInput = currentTurnId => {
+      const startedAt = turnTimings.get(currentTurnId)?.inputEndedAt
+      return startedAt ? Math.max(0, Date.now() - startedAt) : null
+    }
+    const inputTurns = new TurnCorrelation()`,
+    },
+    {
+      label: 'M4 timestamp the end of user speech',
+      alreadyApplied: `rememberTurnInputEnded(stoppedTurn)`,
+      original: `        } else {
+          expectResponseFor(stoppedTurn)`,
+      replacement: `        } else {
+          rememberTurnInputEnded(stoppedTurn)
+          expectResponseFor(stoppedTurn)`,
+    },
+    {
+      label: 'M4 timestamp committed input when speech-stopped is absent',
+      alreadyApplied: `rememberTurnInputEnded(committedInputTurn)`,
+      original: `        if (!inputTurns.isInvalid(event.item_id)) {
+          send(ws, {
+            type: 'voice.state',
+            state: 'processing',
+            turnId: committedInputTurn.turnId,`,
+      replacement: `        if (!inputTurns.isInvalid(event.item_id)) {
+          rememberTurnInputEnded(committedInputTurn)
+          send(ws, {
+            type: 'voice.state',
+            state: 'processing',
+            turnId: committedInputTurn.turnId,`,
+    },
+    {
+      label: 'M4 log model response-start latency',
+      alreadyApplied: `connectionLogger.info('voice_turn.response_started'`,
+      original: `      if (!context.responseStarted) {
+        context.responseStarted = true
+        send(ws, {`,
+      replacement: `      if (!context.responseStarted) {
+        context.responseStarted = true
+        context.responseStartedAt = Date.now()
+        connectionLogger.info('voice_turn.response_started', {
+          turnId: context.turnId || null,
+          responseId: id,
+          origin: context.origin || 'model',
+          sinceInputEndMs: elapsedSinceInput(context.turnId),
+        })
+        send(ws, {`,
+    },
+    {
+      label: 'M4 log first-audio latency for every response',
+      alreadyApplied: `connectionLogger.info('voice_turn.first_audio'`,
+      original: `        if (responseContext?.suppressed) return
+        const responseTurnId = responseContext.turnId || turnId
+        if (id) {`,
+      replacement: `        if (responseContext?.suppressed) return
+        const responseTurnId = responseContext.turnId || turnId
+        if (!responseContext.firstAudioAt) {
+          responseContext.firstAudioAt = Date.now()
+          connectionLogger.info('voice_turn.first_audio', {
+            turnId: responseTurnId || null,
+            responseId: id,
+            origin: responseContext.origin || 'model',
+            sinceInputEndMs: elapsedSinceInput(responseTurnId),
+            sinceResponseStartMs: responseContext.responseStartedAt
+              ? Math.max(0, Date.now() - responseContext.responseStartedAt)
+              : null,
+          })
+        }
+        if (id) {`,
+    },
+    {
+      label: 'M4 log response completion and total turn latency',
+      alreadyApplied: `connectionLogger.info('voice_turn.response_done'`,
+      original: `        const responseFailed = ['failed', 'cancelled', 'incomplete'].includes(
+          responseStatus,
+        )
+        toolCalls.finishToolResponse(id, {`,
+      replacement: `        const responseFailed = ['failed', 'cancelled', 'incomplete'].includes(
+          responseStatus,
+        )
+        connectionLogger.info('voice_turn.response_done', {
+          turnId: responseTurnId || null,
+          responseId: id,
+          origin: responseContext?.origin || 'model',
+          status: responseStatus || 'unknown',
+          hasFunctionCall: Boolean(responseContext?.hasFunctionCall),
+          responseDurationMs: responseContext?.responseStartedAt
+            ? Math.max(0, Date.now() - responseContext.responseStartedAt)
+            : null,
+          sinceInputEndMs: elapsedSinceInput(responseTurnId),
+        })
+        if (!responseContext?.hasFunctionCall && responseTurnId) {
+          turnTimings.delete(responseTurnId)
+        }
+        toolCalls.finishToolResponse(id, {`,
     },
   ])
 

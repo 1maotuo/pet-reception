@@ -86,6 +86,14 @@ def test_seeded_merchant_is_read_from_postgres(client: TestClient) -> None:
         "鸟类",
         "其他非犬宠物",
     ]
+    assert merchant["business_hours"]["closed_weekdays"] == [6]
+    assert merchant["business_hours"]["weekly_hours"][0] == {
+        "weekday": 0,
+        "opens_at": "09:00:00",
+        "closes_at": "17:00:00",
+    }
+    assert merchant["staff"][0]["public_intro"]
+    assert merchant["staff"][0]["specialties"]
     bath, full_groom = merchant["services"]
     assert bath["supported_species"] == ["犬"]
     assert "洗澡" in bath["included_items"]
