@@ -279,6 +279,13 @@ export class MerchantToolClient {
     })
   }
 
+  getBookingPreparation(context, preparationId) {
+    return this.request(
+      `/api/internal/voice/booking-preparations/${encodeURIComponent(preparationId)}`,
+      { context, operation: 'booking preparation recovery' },
+    )
+  }
+
   markBookingPresented(context, preparationId, draftVersion, eventId) {
     return this.request(
       `/api/internal/voice/booking-preparations/${encodeURIComponent(preparationId)}/presented`,
@@ -871,13 +878,56 @@ export class MerchantCoordinator {
     }
     if (toolName === 'confirm_booking') {
       const preparationId = String(args.preparation_id || '')
-      const presentation = this.presentations.get(preparationId)
+      let presentation = this.presentations.get(preparationId)
       if (
         !presentation
         || presentation.ownerId !== context.ownerId
         || presentation.sessionId !== context.sessionId
       ) {
-        throw new Error('preparation is not trusted in this gateway session')
+        const recovered = await this.toolClient.getBookingPreparation(context, preparationId)
+        const recoveredPreparation = recovered?.preparation
+        if (!recoveredPreparation || String(recoveredPreparation.id) !== preparationId) {
+          throw new Error('booking preparation recovery returned an invalid record')
+        }
+        boundedMapSet(this.operations, recovered.operation_id, {
+          ownerId: context.ownerId, sessionId: context.sessionId,
+        })
+        if (
+          ['awaiting_payment', 'confirmed', 'payment_expired'].includes(recovered.status)
+          && recovered.booking
+        ) {
+          return {
+            output: publicOperation(recovered),
+            committed: true,
+            clientPresentation: customerPagePresentation(recovered),
+          }
+        }
+        if (['expired', 'cancelled'].includes(recovered.status)) {
+          return { output: publicOperation(recovered), committed: false }
+        }
+        if (!['prepared', 'presented'].includes(recovered.status)) {
+          throw new Error(`booking preparation cannot be recovered from ${recovered.status}`)
+        }
+        const presentationEventId = recovered.status === 'presented'
+          ? recoveredPreparation.presentation_id
+          : `presentation_${randomUUID()}`
+        if (!presentationEventId) {
+          throw new Error('presented booking preparation has no presentation event')
+        }
+        presentation = {
+          ownerId: context.ownerId,
+          sessionId: context.sessionId,
+          preparationId,
+          operationId: recovered.operation_id,
+          expectedDraftVersion: recoveredPreparation.draft_version,
+          eventId: presentationEventId,
+          confirmationEventId: `confirmation_${randomUUID()}`,
+          summaryDigest: recoveredPreparation.summary_digest,
+          summary: recoveredPreparation.summary,
+          speech: summarySpeech(recoveredPreparation.summary),
+        }
+        boundedMapSet(this.presentations, preparationId, presentation)
+        this.presentationWrites.delete(preparationId)
       }
       if (!this.presentationWrites.has(preparationId)) {
         throw new BookingSummaryPlaybackRequiredError(presentation)

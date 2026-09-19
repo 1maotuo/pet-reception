@@ -524,6 +524,21 @@ def create_app(
             booking_error(error)
             raise AssertionError("unreachable")
 
+    @application.get(
+        "/api/internal/voice/booking-preparations/{preparation_id}",
+        response_model=BookingOperationResult,
+    )
+    def get_booking_preparation(
+        preparation_id: UUID,
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> BookingOperationResult:
+        try:
+            return current_store.get_booking_preparation(context, preparation_id)
+        except booking_errors as error:
+            booking_error(error)
+            raise AssertionError("unreachable")
+
     @application.post(
         "/api/internal/voice/booking-preparations/{preparation_id}/confirm",
         response_model=BookingOperationResult,

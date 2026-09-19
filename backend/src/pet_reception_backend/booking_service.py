@@ -926,6 +926,60 @@ class BookingService:
             context=context,
         )
 
+    def get_preparation(
+        self,
+        context: VoiceRequestContext,
+        preparation_id: UUID,
+    ) -> BookingOperationResult:
+        """Recover one preparation using the full trusted voice identity."""
+        with self.engine.begin() as connection:
+            connection.execute(
+                select(merchants.c.id)
+                .where(merchants.c.id == context.merchant_id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            preparation = connection.execute(
+                select(booking_preparations)
+                .where(
+                    booking_preparations.c.id == preparation_id,
+                    *self._identity(context),
+                )
+                .with_for_update()
+            ).mappings().one_or_none()
+            if preparation is None:
+                raise BookingPreparationNotFoundError(str(preparation_id))
+
+            now = self.now_provider()
+            preparation = self._expire_row(connection, preparation, now)
+            booking = connection.execute(
+                select(bookings)
+                .where(bookings.c.preparation_id == preparation_id)
+                .with_for_update()
+            ).mappings().one_or_none()
+            if booking is not None:
+                booking = expire_unpaid_booking(connection, booking, now)
+            elif preparation["status"] in {"prepared", "presented"}:
+                draft = connection.execute(
+                    self._draft_statement(context).with_for_update()
+                ).mappings().one_or_none()
+                if (
+                    draft is None
+                    or draft["version"] != preparation["draft_version"]
+                    or draft["pending_preparation_id"] != preparation_id
+                ):
+                    raise BookingConfirmationConflictError("draft_version_changed")
+
+        return BookingOperationResult(
+            operation_id=preparation["operation_id"],
+            status=booking["status"] if booking is not None else preparation["status"],
+            preparation=self._preparation_model(preparation),
+            booking=self._booking_model(booking) if booking is not None else None,
+            customer_credential=(
+                self._credential(booking) if booking is not None else None
+            ),
+            context=context,
+        )
+
     def _customer_booking_row(
         self,
         customer_reference: str,

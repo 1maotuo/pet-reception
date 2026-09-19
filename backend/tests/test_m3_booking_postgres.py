@@ -330,6 +330,7 @@ def test_confirmation_gate_idempotency_and_same_record_views(environment) -> Non
     assert retried.json()["booking"] == awaiting["booking"]
     assert retried.json()["customer_credential"] == awaiting["customer_credential"]
 
+
     credential = awaiting["customer_credential"]
     customer_pending = client.get(
         f"/api/customer/bookings/{credential['booking_reference']}",
@@ -380,6 +381,14 @@ def test_confirmation_gate_idempotency_and_same_record_views(environment) -> Non
     assert status_response.status_code == 200
     assert status_response.json()["booking"] == confirmed["booking"]
     assert status_response.json()["customer_credential"] == confirmed["customer_credential"]
+
+    preparation_response = client.get(
+        f"/api/internal/voice/booking-preparations/{preparation['id']}",
+        headers=with_turn(headers),
+    )
+    assert preparation_response.status_code == 200
+    assert preparation_response.json()["status"] == "confirmed"
+    assert preparation_response.json()["booking"] == confirmed["booking"]
 
     customer = client.get(
         f"/api/customer/bookings/{credential['booking_reference']}",
@@ -451,6 +460,58 @@ def test_confirmation_gate_idempotency_and_same_record_views(environment) -> Non
         restarted_status.customer_credential.model_dump(mode="json")
         == confirmed["customer_credential"]
     )
+
+
+def test_presented_preparation_is_recoverable_by_identity_after_store_restart(
+    environment,
+) -> None:
+    client, store, configured = environment
+    headers, _, prepared = build_preparation(client, next_tuesday(280))
+    presentation_id = f"presentation_{uuid4().hex}"
+    presented = mark_presented(
+        client,
+        headers,
+        prepared,
+        presentation_id=presentation_id,
+    )
+
+    response = client.get(
+        f"/api/internal/voice/booking-preparations/{prepared['preparation']['id']}",
+        headers=with_turn(headers),
+    )
+    assert response.status_code == 200, response.text
+    recovered = response.json()
+    assert recovered["operation_id"] == prepared["operation_id"]
+    assert recovered["status"] == "presented"
+    assert recovered["preparation"]["presentation_id"] == presentation_id
+    assert recovered["preparation"]["summary"] == presented["preparation"]["summary"]
+
+    attacker = client.get(
+        f"/api/internal/voice/booking-preparations/{prepared['preparation']['id']}",
+        headers=voice_headers(),
+    )
+    assert attacker.status_code == 404
+
+    restarted_store = PostgresStore(
+        store.engine,
+        booking_hold_minutes=configured.booking_hold_minutes,
+        payment_hold_minutes=configured.payment_hold_minutes,
+        booking_credential_secret=configured.booking_credential_secret,
+        web_origin=configured.web_origin,
+    )
+    context = VoiceRequestContext(
+        merchant_id=MERCHANT_ID,
+        owner_id=headers["X-Voice-Owner-ID"],
+        voice_session_id=headers["X-Voice-Session-ID"],
+        turn_id=f"turn_{uuid4().hex}",
+    )
+    recovered_from_new_store = restarted_store.get_booking_preparation(
+        context,
+        UUID(prepared["preparation"]["id"]),
+    )
+    assert recovered_from_new_store.status == "presented"
+    assert recovered_from_new_store.preparation is not None
+    assert recovered_from_new_store.preparation.presentation_id == presentation_id
 
 
 def test_paid_booking_can_start_a_second_trusted_session_without_reusing_old_draft(
@@ -773,6 +834,13 @@ def test_any_draft_change_invalidates_prepared_snapshot(environment) -> None:
     assert status_response.json()["status"] == "cancelled"
     assert status_response.json()["booking"] is None
     assert status_response.json()["customer_credential"] is None
+    recovered = client.get(
+        f"/api/internal/voice/booking-preparations/{preparation['id']}",
+        headers=with_turn(headers),
+    )
+    assert recovered.status_code == 200
+    assert recovered.json()["status"] == "cancelled"
+    assert recovered.json()["booking"] is None
 
 
 def test_expired_hold_releases_the_slot(environment) -> None:
@@ -790,6 +858,13 @@ def test_expired_hold_releases_the_slot(environment) -> None:
         assert expired.status_code == 200
         assert expired.json()["status"] == "expired"
         assert expired.json()["preparation"]["availability_held"] is False
+        recovered = client.get(
+            f"/api/internal/voice/booking-preparations/{prepared['preparation']['id']}",
+            headers=with_turn(headers),
+        )
+        assert recovered.status_code == 200
+        assert recovered.json()["status"] == "expired"
+        assert recovered.json()["booking"] is None
 
         second_headers = voice_headers()
         _, candidate, second_prepared = build_preparation(

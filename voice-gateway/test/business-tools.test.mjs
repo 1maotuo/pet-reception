@@ -133,6 +133,9 @@ test('controlled summary requires a matching full playback transcript before pre
   const toolClient = {
     getBookingDraft: async () => ({ draft: draft() }),
     prepareBooking: async () => preparationResult(),
+    getBookingPreparation: async () => {
+      throw new Error('preparation is not trusted in this gateway session')
+    },
     markBookingPresented: async (...args) => {
       writes.push(args)
       return { ...preparationResult(), status: 'presented' }
@@ -881,6 +884,122 @@ test('an uncertain confirmation keeps its operation id when status lookup also f
       && error.detail?.recovery === 'query_same_operation'
     ),
   )
+})
+
+test('a restarted coordinator replays a persisted presented summary before confirming', async () => {
+  let presentationWrites = 0
+  let confirmCalls = 0
+  const persistedPresentationId = 'presentation_persisted_restart'
+  const persisted = {
+    ...preparationResult(),
+    status: 'presented',
+    preparation: {
+      ...preparationResult().preparation,
+      status: 'presented',
+      presentation_id: persistedPresentationId,
+    },
+  }
+  const toolClient = {
+    getBookingPreparation: async (_received, preparationId) => {
+      assert.equal(preparationId, preparationResult().preparation.id)
+      return persisted
+    },
+    markBookingPresented: async (_received, preparationId, draftVersion, eventId) => {
+      presentationWrites += 1
+      assert.equal(preparationId, preparationResult().preparation.id)
+      assert.equal(draftVersion, 2)
+      assert.equal(eventId, persistedPresentationId)
+      return persisted
+    },
+    confirmBooking: async (_received, preparationId, draftVersion) => {
+      confirmCalls += 1
+      assert.equal(preparationId, preparationResult().preparation.id)
+      assert.equal(draftVersion, 2)
+      return {
+        ...persisted,
+        status: 'awaiting_payment',
+        booking: { id: 'booking-recovered', status: 'awaiting_payment' },
+        customer_credential: null,
+      }
+    },
+  }
+  const restarted = new MerchantCoordinator({ toolClient })
+  let replay
+  await assert.rejects(
+    restarted.runBusinessTool(
+      'confirm_booking',
+      { preparation_id: preparationResult().preparation.id },
+      { ...context, turnId: 'turn-after-restart' },
+    ),
+    (error) => {
+      assert.equal(error instanceof BookingSummaryPlaybackRequiredError, true)
+      replay = error.presentation
+      return true
+    },
+  )
+  assert.equal(confirmCalls, 0)
+  assert.equal(presentationWrites, 0)
+  assert.equal(replay.eventId, persistedPresentationId)
+  assert.match(replay.speech, /现在还没有创建正式预约/)
+
+  const replayed = await restarted.markBookingPresented({
+    preparationId: replay.preparationId,
+    eventId: replay.eventId,
+  }, {
+    ...context,
+    turnId: 'turn-summary-replay',
+    transcript: replay.speech,
+  })
+  assert.equal(replayed.status, 'presented')
+  assert.equal(presentationWrites, 1)
+
+  const confirmed = await restarted.runBusinessTool(
+    'confirm_booking',
+    { preparation_id: replay.preparationId },
+    { ...context, turnId: 'turn-confirm-after-replay' },
+  )
+  assert.equal(confirmed.output.status, 'awaiting_payment')
+  assert.equal(confirmCalls, 1)
+})
+
+test('restart recovery returns terminal preparation state without creating another booking', async () => {
+  let confirmCalls = 0
+  for (const recovered of [
+    {
+      ...preparationResult(),
+      status: 'expired',
+      preparation: { ...preparationResult().preparation, status: 'expired' },
+    },
+    {
+      ...preparationResult(),
+      status: 'cancelled',
+      preparation: { ...preparationResult().preparation, status: 'cancelled' },
+    },
+    {
+      ...preparationResult(),
+      status: 'confirmed',
+      preparation: { ...preparationResult().preparation, status: 'confirmed' },
+      booking: { id: 'existing-booking', status: 'confirmed' },
+      customer_credential: null,
+    },
+  ]) {
+    const restarted = new MerchantCoordinator({
+      toolClient: {
+        getBookingPreparation: async () => recovered,
+        confirmBooking: async () => { confirmCalls += 1 },
+      },
+    })
+    const result = await restarted.runBusinessTool(
+      'confirm_booking',
+      { preparation_id: preparationResult().preparation.id },
+      { ...context, turnId: `turn-recover-${recovered.status}` },
+    )
+    assert.equal(result.output.status, recovered.status)
+    if (recovered.status === 'confirmed') {
+      assert.equal(result.output.booking.id, 'existing-booking')
+    }
+  }
+  assert.equal(confirmCalls, 0)
 })
 
 test('late business result is attached without causing speech or a second submit', async () => {

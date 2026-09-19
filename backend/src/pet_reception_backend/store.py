@@ -175,6 +175,10 @@ class DataStore(Protocol):
         confirmation_event_id: str,
     ) -> BookingOperationResult: ...
 
+    def get_booking_preparation(
+        self, context: VoiceRequestContext, preparation_id: UUID
+    ) -> BookingOperationResult: ...
+
     def get_booking_status(
         self, context: VoiceRequestContext, operation_id: UUID
     ) -> BookingOperationResult: ...
@@ -1418,6 +1422,13 @@ class PostgresStore:
             expected_draft_version=expected_draft_version,
             confirmation_event_id=confirmation_event_id,
         )
+
+    def get_booking_preparation(
+        self,
+        context: VoiceRequestContext,
+        preparation_id: UUID,
+    ) -> BookingOperationResult:
+        return self.booking_service.get_preparation(context, preparation_id)
 
     def get_booking_status(
         self,
