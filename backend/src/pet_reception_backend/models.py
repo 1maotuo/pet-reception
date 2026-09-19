@@ -56,6 +56,7 @@ merchant_services = Table(
     Column("name_zh", String(200), nullable=False),
     Column("duration_minutes", Integer, nullable=False),
     Column("price_note", String(500), nullable=False),
+    Column("active", Boolean, nullable=False, server_default="true"),
     Column("display_order", Integer, nullable=False, server_default="0"),
     Column("buffer_before_minutes", Integer, nullable=False, server_default="0"),
     Column("buffer_after_minutes", Integer, nullable=False, server_default="0"),

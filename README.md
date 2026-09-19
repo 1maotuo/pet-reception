@@ -128,7 +128,9 @@ PATCH 只接受业务字段。`merchant_id`、`owner_id`、`voice_session_id`、
 
 响应分别返回 `missing_for_availability` 与 `missing_for_booking`。查询只要求真实服务与日期；如果用户点名人员，还必须先得到当前商家真实 `staff_id`。正式提交仍要求客户、电话、宠物及后续选择的候选时段，因此 M2 不会误称已经预约成功。
 
-排班查询使用独立的 `availability_revision`：服务、日期、时段或人员变化会使旧候选变成 `stale`，而姓名和联系电话变化不会无条件重查排班。候选时间带商家 IANA 时区偏移；无空档时只返回后续真实开放日期。查询结果明确包含 `availability_checked=true` 和 `booking_created=false`。
+排班查询使用独立的 `availability_revision`：服务、日期、时段或人员变化会使旧候选变成 `stale`，而姓名和联系电话变化不会无条件重查排班。人员偏好文本发生实质变化但未同时提交新的真实 `staff_id` 时，旧人员 ID 会自动撤销并重新进入待解析状态。重读查询只返回尚未开始的候选；全部候选或请求日期过期后返回 `stale / availability_expired`。
+
+候选时间带商家 IANA 时区偏移；无空档时只返回后续真实开放日期。DST 切换日中不存在、存在歧义或跨越 UTC offset 跳变的时间段不会生成候选，其余时段仍按真实 UTC 时长计算。重新导入配置时，被移除的服务和员工会停用而不是删除历史引用，并使相关草稿和旧候选失效；恢复配置可重新启用。查询结果明确包含 `availability_checked=true` 和 `booking_created=false`。
 
 可在 FastAPI 文档中查看契约，也可直接运行真实 PostgreSQL 行为测试：
 

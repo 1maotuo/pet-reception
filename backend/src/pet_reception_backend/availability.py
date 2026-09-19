@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -30,10 +30,40 @@ class AlternativeDate:
 
 
 def _round_up(value: datetime, interval_minutes: int) -> datetime:
-    minutes = value.hour * 60 + value.minute
-    rounded = ((minutes + interval_minutes - 1) // interval_minutes) * interval_minutes
     midnight = value.replace(hour=0, minute=0, second=0, microsecond=0)
-    return midnight + timedelta(minutes=rounded)
+    elapsed = value - midnight
+    interval = timedelta(minutes=interval_minutes)
+    quotient, remainder = divmod(elapsed, interval)
+    if remainder:
+        quotient += 1
+    return midnight + quotient * interval
+
+
+def _unique_local_time(value: datetime, zone: ZoneInfo) -> datetime | None:
+    """Resolve a naive wall time only when it maps to exactly one real instant."""
+    matches: list[datetime] = []
+    seen_instants: set[datetime] = set()
+    for fold in (0, 1):
+        candidate = value.replace(tzinfo=zone, fold=fold)
+        instant = candidate.astimezone(timezone.utc)
+        round_trip = instant.astimezone(zone)
+        if round_trip.replace(tzinfo=None) != value or round_trip.fold != fold:
+            continue
+        if instant in seen_instants:
+            continue
+        seen_instants.add(instant)
+        matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _add_elapsed_minutes(value: datetime, minutes: int, zone: ZoneInfo) -> datetime:
+    return (
+        value.astimezone(timezone.utc) + timedelta(minutes=minutes)
+    ).astimezone(zone)
+
+
+def _utc(value: datetime) -> datetime:
+    return value.astimezone(timezone.utc)
 
 
 def _matches_time_of_day(value: datetime, preference: str | None) -> bool:
@@ -67,25 +97,48 @@ def candidate_windows_for_date(
     for window in windows:
         if window.weekday != requested_date.weekday():
             continue
-        working_start = datetime.combine(requested_date, window.start_time, zone)
-        working_end = datetime.combine(requested_date, window.end_time, zone)
-        service_start = _round_up(
-            working_start + timedelta(minutes=buffer_before_minutes),
+        working_start_wall = datetime.combine(requested_date, window.start_time)
+        working_end_wall = datetime.combine(requested_date, window.end_time)
+        working_start = _unique_local_time(working_start_wall, zone)
+        working_end = _unique_local_time(working_end_wall, zone)
+        if working_start is None or working_end is None:
+            continue
+        service_start_wall = _round_up(
+            working_start_wall + timedelta(minutes=buffer_before_minutes),
             slot_interval_minutes,
         )
-        while True:
-            service_end = service_start + timedelta(minutes=duration_minutes)
-            busy_start = service_start - timedelta(minutes=buffer_before_minutes)
-            busy_end = service_end + timedelta(minutes=buffer_after_minutes)
-            if busy_end > working_end:
-                break
+        while service_start_wall < working_end_wall:
+            service_start = _unique_local_time(service_start_wall, zone)
+            service_start_wall += timedelta(minutes=slot_interval_minutes)
+            if service_start is None:
+                continue
+            service_end = _add_elapsed_minutes(service_start, duration_minutes, zone)
+            busy_start = _add_elapsed_minutes(
+                service_start,
+                -buffer_before_minutes,
+                zone,
+            )
+            busy_end = _add_elapsed_minutes(service_end, buffer_after_minutes, zone)
+            interval_points = (busy_start, service_start, service_end, busy_end)
+            if any(
+                point.utcoffset() != service_start.utcoffset()
+                for point in interval_points
+            ):
+                continue
+            if _utc(busy_start) < _utc(working_start) or _utc(busy_end) > _utc(
+                working_end
+            ):
+                continue
             key = (window.staff_id, service_start)
             if (
                 key not in seen
-                and (not_before is None or service_start >= not_before)
+                and (
+                    not_before is None
+                    or _utc(service_start) >= _utc(not_before)
+                )
                 and _matches_time_of_day(
-                service_start,
-                preferred_time_of_day,
+                    service_start,
+                    preferred_time_of_day,
                 )
             ):
                 seen.add(key)
@@ -99,7 +152,6 @@ def candidate_windows_for_date(
                         busy_ends_at=busy_end,
                     )
                 )
-            service_start += timedelta(minutes=slot_interval_minutes)
 
     results.sort(key=lambda item: (item.starts_at, item.staff_display_name, item.staff_id))
     return results[:limit]

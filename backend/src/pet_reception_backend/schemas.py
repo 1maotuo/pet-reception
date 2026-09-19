@@ -67,6 +67,8 @@ class WeeklyWindowSeed(BaseModel):
 
     @model_validator(mode="after")
     def require_forward_window(self) -> "WeeklyWindowSeed":
+        if self.start_time.tzinfo is not None or self.end_time.tzinfo is not None:
+            raise ValueError("working window times must be local wall times without offsets")
         if self.start_time >= self.end_time:
             raise ValueError("working window start_time must be before end_time")
         return self

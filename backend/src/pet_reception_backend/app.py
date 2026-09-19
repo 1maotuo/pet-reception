@@ -77,7 +77,7 @@ def create_app(
 
     application = FastAPI(
         title="Pet Reception Backend",
-        version="0.3.0",
+        version="0.3.1",
         lifespan=lifespan,
     )
     application.add_middleware(

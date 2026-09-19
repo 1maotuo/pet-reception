@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Engine, case, delete, func, select
+from sqlalchemy import Engine, case, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from .availability import (
@@ -127,9 +127,11 @@ class PostgresStore:
         candidate_calculator: Callable[..., list[CandidateWindow]] = (
             candidate_windows_for_date
         ),
+        now_provider: Callable[[ZoneInfo], datetime] = datetime.now,
     ) -> None:
         self.engine = engine
         self.candidate_calculator = candidate_calculator
+        self.now_provider = now_provider
 
     @staticmethod
     def _schedule_fingerprint(merchant: DemoMerchant) -> str | None:
@@ -164,7 +166,10 @@ class PostgresStore:
                 return None
             service_rows = connection.execute(
                 select(merchant_services)
-                .where(merchant_services.c.merchant_id == merchant_id)
+                .where(
+                    merchant_services.c.merchant_id == merchant_id,
+                    merchant_services.c.active.is_(True),
+                )
                 .order_by(merchant_services.c.display_order, merchant_services.c.id)
             ).mappings()
             services = [
@@ -247,6 +252,14 @@ class PostgresStore:
         unknown_buffer_services = set(buffer_by_service).difference(service_ids)
         if unknown_buffer_services:
             raise UnknownServiceError(sorted(unknown_buffer_services)[0])
+        current_staff_ids = {
+            staff.id for staff in scheduling.staff
+        } if scheduling else set()
+        if scheduling:
+            for staff in scheduling.staff:
+                unknown_staff_services = set(staff.service_ids).difference(service_ids)
+                if unknown_staff_services:
+                    raise UnknownServiceError(sorted(unknown_staff_services)[0])
         with self.engine.begin() as connection:
             connection.execute(
                 pg_insert(merchants)
@@ -274,6 +287,11 @@ class PostgresStore:
                     },
                 )
             )
+            connection.execute(
+                merchant_services.update()
+                .where(merchant_services.c.merchant_id == merchant.id)
+                .values(active=False, updated_at=func.now())
+            )
             for display_order, service in enumerate(merchant.services):
                 service_values = {
                     "merchant_id": merchant.id,
@@ -281,6 +299,7 @@ class PostgresStore:
                     "name_zh": service.name_zh,
                     "duration_minutes": service.duration_minutes,
                     "price_note": service.price_note,
+                    "active": True,
                     "display_order": display_order,
                     "buffer_before_minutes": (
                         buffer_by_service[service.id].buffer_before_minutes
@@ -312,18 +331,28 @@ class PostgresStore:
                     )
                 )
 
-            if scheduling is None:
-                return
-
             connection.execute(
                 staff_members.update()
                 .where(staff_members.c.merchant_id == merchant.id)
                 .values(active=False, updated_at=func.now())
             )
-            for staff in scheduling.staff:
-                unknown_staff_services = set(staff.service_ids).difference(service_ids)
-                if unknown_staff_services:
-                    raise UnknownServiceError(sorted(unknown_staff_services)[0])
+            removed_staff_condition = (
+                staff_service_qualifications.c.merchant_id == merchant.id
+            )
+            removed_hours_condition = staff_working_hours.c.merchant_id == merchant.id
+            if current_staff_ids:
+                removed_staff_condition = removed_staff_condition & (
+                    staff_service_qualifications.c.staff_id.not_in(current_staff_ids)
+                )
+                removed_hours_condition = removed_hours_condition & (
+                    staff_working_hours.c.staff_id.not_in(current_staff_ids)
+                )
+            connection.execute(
+                delete(staff_service_qualifications).where(removed_staff_condition)
+            )
+            connection.execute(delete(staff_working_hours).where(removed_hours_condition))
+
+            for staff in scheduling.staff if scheduling else []:
                 connection.execute(
                     pg_insert(staff_members)
                     .values(
@@ -381,6 +410,59 @@ class PostgresStore:
                     ],
                 )
 
+            invalid_service = booking_drafts.c.service_id.is_not(None)
+            if service_ids:
+                invalid_service = invalid_service & booking_drafts.c.service_id.not_in(
+                    service_ids
+                )
+            invalid_staff = booking_drafts.c.staff_id.is_not(None)
+            if current_staff_ids:
+                invalid_staff = invalid_staff & booking_drafts.c.staff_id.not_in(
+                    current_staff_ids
+                )
+            valid_qualification = (
+                select(staff_service_qualifications.c.staff_id)
+                .where(
+                    staff_service_qualifications.c.merchant_id
+                    == booking_drafts.c.merchant_id,
+                    staff_service_qualifications.c.staff_id
+                    == booking_drafts.c.staff_id,
+                    staff_service_qualifications.c.service_id
+                    == booking_drafts.c.service_id,
+                )
+                .exists()
+            )
+            invalid_qualification = (
+                booking_drafts.c.staff_id.is_not(None)
+                & booking_drafts.c.service_id.is_not(None)
+                & ~valid_qualification
+            )
+            invalid_staff_assignment = or_(
+                invalid_service,
+                invalid_staff,
+                invalid_qualification,
+            )
+            connection.execute(
+                booking_drafts.update()
+                .where(
+                    booking_drafts.c.merchant_id == merchant.id,
+                    or_(invalid_service, invalid_staff, invalid_qualification),
+                )
+                .values(
+                    service_id=case(
+                        (invalid_service, None),
+                        else_=booking_drafts.c.service_id,
+                    ),
+                    staff_id=case(
+                        (invalid_staff_assignment, None),
+                        else_=booking_drafts.c.staff_id,
+                    ),
+                    version=booking_drafts.c.version + 1,
+                    availability_revision=booking_drafts.c.availability_revision + 1,
+                    updated_at=func.now(),
+                )
+            )
+
     def _draft_identity(self, context: VoiceRequestContext) -> dict[str, str]:
         return {
             "merchant_id": context.merchant_id,
@@ -434,21 +516,33 @@ class PostgresStore:
             if current["version"] != expected_version:
                 raise DraftVersionConflictError(current_version=current["version"])
 
-            service_id = changes.get("service_id")
+            normalized_changes = dict(changes)
+            preference_changed = (
+                "staff_preference_text" in normalized_changes
+                and normalized_changes["staff_preference_text"]
+                != current["staff_preference_text"]
+            )
+            if preference_changed and "staff_id" not in normalized_changes:
+                normalized_changes["staff_id"] = None
+
+            service_id = normalized_changes.get("service_id")
             if service_id is not None:
                 service_exists = connection.execute(
                     select(merchant_services.c.id).where(
                         merchant_services.c.merchant_id == context.merchant_id,
                         merchant_services.c.id == service_id,
+                        merchant_services.c.active.is_(True),
                     )
                 ).scalar_one_or_none()
                 if service_exists is None:
                     raise UnknownServiceError(str(service_id))
 
-            effective_service_id = changes.get("service_id", current["service_id"])
-            effective_staff_id = changes.get("staff_id", current["staff_id"])
+            effective_service_id = normalized_changes.get(
+                "service_id", current["service_id"]
+            )
+            effective_staff_id = normalized_changes.get("staff_id", current["staff_id"])
             if effective_staff_id is not None and {"staff_id", "service_id"}.intersection(
-                changes
+                normalized_changes
             ):
                 staff_exists = connection.execute(
                     select(staff_members.c.id).where(
@@ -476,12 +570,15 @@ class PostgresStore:
             changed_fields = [
                 field
                 for field in DRAFT_MUTABLE_FIELDS
-                if field in changes and current[field] != changes[field]
+                if field in normalized_changes
+                and current[field] != normalized_changes[field]
             ]
             if not changed_fields:
                 return BookingDraft.model_validate(dict(current)), []
 
-            update_values = {field: changes[field] for field in changed_fields}
+            update_values = {
+                field: normalized_changes[field] for field in changed_fields
+            }
             if "contact_phone" in changed_fields:
                 update_values["contact_phone_source"] = (
                     "voice_user_provided"
@@ -531,13 +628,14 @@ class PostgresStore:
             ).mappings().one_or_none()
             if merchant is None:
                 raise MerchantNotFoundError(context.merchant_id)
-            merchant_today = datetime.now(ZoneInfo(merchant["time_zone"])).date()
+            merchant_today = self.now_provider(ZoneInfo(merchant["time_zone"])).date()
             if draft["preferred_date"] < merchant_today:
                 raise AvailabilityPastDateError(draft["preferred_date"].isoformat())
             service = connection.execute(
                 select(merchant_services).where(
                     merchant_services.c.merchant_id == context.merchant_id,
                     merchant_services.c.id == draft["service_id"],
+                    merchant_services.c.active.is_(True),
                 )
             ).mappings().one_or_none()
             if service is None:
@@ -593,7 +691,7 @@ class PostgresStore:
             context,
             expected_availability_revision,
         )
-        merchant_now = datetime.now(ZoneInfo(merchant["time_zone"]))
+        merchant_now = self.now_provider(ZoneInfo(merchant["time_zone"]))
         candidates = self.candidate_calculator(
             requested_date=draft["preferred_date"],
             merchant_time_zone=merchant["time_zone"],
@@ -749,9 +847,9 @@ class PostgresStore:
                 == draft["preferred_time_of_day"]
                 and search["staff_id"] == draft["staff_id"]
             )
-            is_current = schedule_is_current and draft_is_current
+            snapshot_is_current = schedule_is_current and draft_is_current
             candidate_rows = []
-            if is_current:
+            if snapshot_is_current:
                 candidate_rows = list(
                     connection.execute(
                         select(availability_candidates)
@@ -761,6 +859,32 @@ class PostgresStore:
                 )
 
         zone = ZoneInfo(search["merchant_time_zone"])
+        merchant_now = self.now_provider(zone)
+        candidate_rows = [
+            row
+            for row in candidate_rows
+            if row["starts_at"].astimezone(zone) >= merchant_now
+        ]
+        alternatives = (
+            [
+                AlternativeAvailabilityDate.model_validate(value)
+                for value in search["alternative_dates"]
+            ]
+            if snapshot_is_current
+            else []
+        )
+        alternatives = [
+            alternative
+            for alternative in alternatives
+            if alternative.first_start_at.astimezone(zone) >= merchant_now
+        ]
+        time_is_current = search["preferred_date"] >= merchant_now.date()
+        if search["status"] == "available":
+            time_is_current = time_is_current and bool(candidate_rows)
+        is_current = snapshot_is_current and time_is_current
+        if not is_current:
+            candidate_rows = []
+            alternatives = []
         candidates = [
             AvailabilityCandidate(
                 id=row["id"],
@@ -775,14 +899,6 @@ class PostgresStore:
             )
             for row in candidate_rows
         ]
-        alternatives = (
-            [
-                AlternativeAvailabilityDate.model_validate(value)
-                for value in search["alternative_dates"]
-            ]
-            if is_current
-            else []
-        )
         return AvailabilitySearchResult(
             id=search["id"],
             status=search["status"] if is_current else "stale",
@@ -793,7 +909,11 @@ class PostgresStore:
                 else (
                     "merchant_schedule_changed"
                     if not schedule_is_current
-                    else "draft_availability_changed"
+                    else (
+                        "draft_availability_changed"
+                        if not draft_is_current
+                        else "availability_expired"
+                    )
                 )
             ),
             draft_id=search["draft_id"],

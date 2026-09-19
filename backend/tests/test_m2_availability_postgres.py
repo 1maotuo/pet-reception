@@ -1,5 +1,5 @@
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from threading import Event, Thread
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -17,6 +17,7 @@ from pet_reception_backend.schemas import VoiceRequestContext
 from pet_reception_backend.store import (
     AvailabilityRevisionConflictError,
     PostgresStore,
+    UnknownServiceError,
 )
 
 
@@ -367,6 +368,246 @@ def test_unknown_or_unqualified_staff_is_rejected_without_state_change(
     )
     assert unknown.status_code == 422
     assert unknown.json()["detail"]["code"] == "unknown_staff"
+
+
+def test_staff_preference_change_invalidates_old_resolved_staff(environment) -> None:
+    client, _ = environment
+    trusted_headers = headers()
+    initial = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=trusted_headers,
+        json={
+            "expected_version": 0,
+            "service_id": "demo-bath",
+            "preferred_date": OPEN_FRIDAY.isoformat(),
+            "staff_preference_text": "Lisa",
+            "staff_id": "demo-staff-lisa",
+        },
+    ).json()
+
+    changed = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=trusted_headers,
+        json={
+            "expected_version": initial["draft"]["version"],
+            "staff_preference_text": "Marco",
+        },
+    ).json()
+    assert changed["draft"]["staff_preference_text"] == "Marco"
+    assert changed["draft"]["staff_id"] is None
+    assert set(changed["changed_fields"]) == {"staff_preference_text", "staff_id"}
+    assert changed["missing_for_availability"] == ["staff_id"]
+
+    repeated = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=trusted_headers,
+        json={
+            "expected_version": changed["draft"]["version"],
+            "staff_preference_text": "Marco",
+        },
+    ).json()
+    assert repeated["changed_fields"] == []
+    assert repeated["draft"]["version"] == changed["draft"]["version"]
+
+    resolved = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=trusted_headers,
+        json={
+            "expected_version": repeated["draft"]["version"],
+            "staff_preference_text": "Marco 指定",
+            "staff_id": "demo-staff-marco",
+        },
+    ).json()
+    assert resolved["draft"]["staff_id"] == "demo-staff-marco"
+    assert resolved["missing_for_availability"] == []
+
+    after_phone = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=trusted_headers,
+        json={
+            "expected_version": resolved["draft"]["version"],
+            "contact_phone": "+1-415-555-0199",
+        },
+    ).json()
+    assert after_phone["draft"]["staff_id"] == "demo-staff-marco"
+    assert (
+        after_phone["draft"]["availability_revision"]
+        == resolved["draft"]["availability_revision"]
+    )
+
+    cleared = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=trusted_headers,
+        json={
+            "expected_version": after_phone["draft"]["version"],
+            "clear_fields": ["staff_preference_text"],
+        },
+    ).json()
+    assert cleared["draft"]["staff_preference_text"] is None
+    assert cleared["draft"]["staff_id"] is None
+    assert set(cleared["changed_fields"]) == {"staff_preference_text", "staff_id"}
+
+
+def test_reread_filters_elapsed_candidates_and_expires_old_search(environment) -> None:
+    _, store = environment
+    trusted_context = context()
+    initial = store.get_or_create_draft(trusted_context)
+    draft, _ = store.update_draft(
+        trusted_context,
+        initial.version,
+        {
+            "service_id": "demo-bath",
+            "preferred_date": OPEN_FRIDAY,
+        },
+    )
+    search = store.search_availability(
+        trusted_context,
+        draft.availability_revision,
+    )
+    assert len(search.candidates) > 1
+
+    partially_elapsed = PostgresStore(
+        store.engine,
+        now_provider=lambda zone: datetime.combine(OPEN_FRIDAY, time(10, 0), zone),
+    ).get_availability_search(trusted_context, search.id)
+    assert partially_elapsed.is_current is True
+    assert partially_elapsed.status == "available"
+    assert partially_elapsed.candidates
+    assert all(
+        candidate.starts_at >= datetime.combine(OPEN_FRIDAY, time(10, 0), candidate.starts_at.tzinfo)
+        for candidate in partially_elapsed.candidates
+    )
+    assert len(partially_elapsed.candidates) < len(search.candidates)
+
+    expired = PostgresStore(
+        store.engine,
+        now_provider=lambda zone: datetime.combine(OPEN_FRIDAY, time(23, 59), zone),
+    ).get_availability_search(trusted_context, search.id)
+    assert expired.is_current is False
+    assert expired.status == "stale"
+    assert expired.stale_reason == "availability_expired"
+    assert expired.candidates == []
+    assert expired.alternative_dates == []
+
+
+def test_config_import_retires_removed_services_staff_and_schedule(environment) -> None:
+    _, store = environment
+    merchant_id = f"review-config-{uuid4().hex}"
+    base_config = load_demo_merchant().model_copy(deep=True)
+    base_config.id = merchant_id
+    base_config.display_name = "M2 Review Config Merchant"
+    base_config.source = f"m2-review-test:{merchant_id}"
+    store.upsert_merchant(base_config)
+    trusted_context = VoiceRequestContext(
+        merchant_id=merchant_id,
+        owner_id=f"owner_{uuid4().hex}",
+        voice_session_id=f"session_{uuid4().hex}",
+        turn_id=f"turn_{uuid4().hex}",
+    )
+    initial = store.get_or_create_draft(trusted_context)
+    prepared, _ = store.update_draft(
+        trusted_context,
+        initial.version,
+        {
+            "service_id": "demo-bath",
+            "preferred_date": OPEN_FRIDAY,
+            "staff_preference_text": "Lisa",
+            "staff_id": "demo-staff-lisa",
+        },
+    )
+
+    without_lisa = base_config.model_copy(deep=True)
+    without_lisa.scheduling.staff = [
+        staff
+        for staff in without_lisa.scheduling.staff
+        if staff.id == "demo-staff-marco"
+    ]
+    store.upsert_merchant(without_lisa)
+    after_staff_removal = store.get_or_create_draft(trusted_context)
+    assert after_staff_removal.staff_preference_text == "Lisa"
+    assert after_staff_removal.staff_id is None
+    assert after_staff_removal.version == prepared.version + 1
+    assert (
+        after_staff_removal.availability_revision
+        == prepared.availability_revision + 1
+    )
+    assert [staff.id for staff in store.get_merchant(merchant_id).staff] == [
+        "demo-staff-marco"
+    ]
+
+    without_bath = base_config.model_copy(deep=True)
+    without_bath.services = [
+        service
+        for service in without_bath.services
+        if service.id == "demo-full-groom"
+    ]
+    without_bath.scheduling.service_buffers = [
+        buffer
+        for buffer in without_bath.scheduling.service_buffers
+        if buffer.service_id == "demo-full-groom"
+    ]
+    without_bath.scheduling.staff = [
+        staff
+        for staff in without_bath.scheduling.staff
+        if staff.id == "demo-staff-lisa"
+    ]
+    without_bath.scheduling.staff[0].service_ids = ["demo-full-groom"]
+    store.upsert_merchant(without_bath)
+    after_service_removal = store.get_or_create_draft(trusted_context)
+    assert after_service_removal.service_id is None
+    assert after_service_removal.staff_id is None
+    assert after_service_removal.version == after_staff_removal.version + 1
+    assert (
+        after_service_removal.availability_revision
+        == after_staff_removal.availability_revision + 1
+    )
+    assert [service.id for service in store.get_merchant(merchant_id).services] == [
+        "demo-full-groom"
+    ]
+    with pytest.raises(UnknownServiceError):
+        store.update_draft(
+            trusted_context,
+            after_service_removal.version,
+            {"service_id": "demo-bath"},
+        )
+
+    without_schedule = base_config.model_copy(deep=True)
+    without_schedule.scheduling = None
+    store.upsert_merchant(without_schedule)
+    assert store.get_merchant(merchant_id).staff == []
+    no_schedule_context = VoiceRequestContext(
+        merchant_id=merchant_id,
+        owner_id=f"owner_{uuid4().hex}",
+        voice_session_id=f"session_{uuid4().hex}",
+        turn_id=f"turn_{uuid4().hex}",
+    )
+    no_schedule_initial = store.get_or_create_draft(no_schedule_context)
+    no_schedule_draft, _ = store.update_draft(
+        no_schedule_context,
+        no_schedule_initial.version,
+        {
+            "service_id": "demo-bath",
+            "preferred_date": OPEN_FRIDAY,
+        },
+    )
+    no_schedule_search = store.search_availability(
+        no_schedule_context,
+        no_schedule_draft.availability_revision,
+    )
+    assert no_schedule_search.status == "no_availability"
+    assert no_schedule_search.candidates == []
+    assert no_schedule_search.alternative_dates == []
+
+    store.upsert_merchant(base_config)
+    recovered = store.get_merchant(merchant_id)
+    assert [service.id for service in recovered.services] == [
+        "demo-bath",
+        "demo-full-groom",
+    ]
+    assert [staff.id for staff in recovered.staff] == [
+        "demo-staff-lisa",
+        "demo-staff-marco",
+    ]
 
 
 def test_past_date_is_rejected_in_the_merchant_time_zone(environment) -> None:
