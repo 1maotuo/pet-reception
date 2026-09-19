@@ -1,6 +1,6 @@
 # Pet Reception
 
-面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库已实现 M3 确定性业务闭环：在已验收的 M0/M1 工程与语音接缝及 M2 商家/草稿/排班之上，加入短时占位、受信确认门槛、幂等预约事务、状态恢复，以及客户和商家从同一持久记录读取结果。M3 尚待用户阶段验收；实时模型要到 M4 才接入这些写工具。
+面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库已实现 M3 确定性业务闭环：短时占位、受信确认门槛、待付款记录、本地模拟付款后正式确认、状态恢复，以及客户和商家从同一持久记录读取结果。M3 尚待用户阶段验收；实时模型要到 M4 才接入这些写工具。
 
 ## 当前组件
 
@@ -13,7 +13,7 @@
 
 ## 运行条件
 
-- Node.js `24.15.0` 与 npm `11.12.1`。Qwen Audio Agent 1.11.0 要求 `^22.22.2 || ^24.15.0 || >=26.0.0`；项目按已验证的 24.15.0 固定。
+- Node.js `^24.15.0` 与 npm `11.12.1`。Qwen Audio Agent 1.11.0 要求 `^22.22.2 || ^24.15.0 || >=26.0.0`；本仓已在 24.15.0 和 24.19.0 验证，项目限定 Node 24 的兼容范围。
 - Python `3.12.x`。
 - Docker Desktop，用于开发 PostgreSQL。
 - 真实语音需要百炼 `DASHSCOPE_API_KEY`、浏览器麦克风权限和可用音频设备。
@@ -37,7 +37,7 @@ DASHSCOPE_API_KEY=你的百炼APIKey
 安装依赖：
 
 ```powershell
-node --version  # 必须是 v24.15.0
+node --version  # 必须是 v24.15.0 或更高的 Node 24
 npm ci
 
 python -m venv backend\.venv
@@ -164,10 +164,11 @@ M3 业务入口保持在确定性 HTTP 层，尚未暴露给实时模型：
 - `POST /api/internal/voice/booking-preparations/{id}/presented`：由受信协调层记录该快照已经完整呈现；呈现事件不来自模型正文。
 - `POST /api/internal/voice/booking-preparations/{id}/confirm`：只接受期望草稿版本，并要求新的受信语音轮次与确认事件；正文中的 `confirmed=true` 会因额外字段被拒绝。
 - `GET /api/internal/voice/booking-operations/{operation_id}`：在超时、断线或响应丢失后核实同一操作，不重新创建预约。
-- `GET /api/customer/bookings/{confirmation_code}`：使用预约专属 Bearer 凭证读取客户结果。
+- `GET /api/customer/bookings/{booking_reference}`：使用预约专属 Bearer 凭证读取待付款、已确认或已过期结果。
+- `POST /api/customer/bookings/{booking_reference}/simulate-payment`：本地开发模拟付款成功；只接收受保护的预约凭证和幂等事件，不接收银行卡资料。
 - `GET /api/internal/merchant/bookings[/{id}]`：使用商家管理员令牌读取固定商家的同一预约记录。
 
-准备后任何客户资料或预约条件的实质变化都会撤销旧摘要/占位；占位过期也会释放。确认在 PostgreSQL 单事务中完成，重复确认返回原预约，人员区间冲突不会产生第二条预约。客户页面路径为凭证返回的 `/booking/{confirmation_code}#token=...`；token 位于 URL fragment，不会由浏览器作为普通 URL 请求发送，前端仅把它作为 Bearer 凭证调用后端，数据库只保存 token 哈希。
+准备后任何客户资料或预约条件的实质变化都会撤销旧摘要/占位；占位过期也会释放。确认在 PostgreSQL 单事务中创建 `awaiting_payment` 记录，重复确认返回同一记录，人员区间冲突不会产生第二条有效占位。客户页面路径为凭证返回的 `/booking/{booking_reference}#token=...`；付款前页面不会显示成功或正式确认码。本地模拟付款后同一记录才变成 `confirmed` 并生成 `PR-` 码。付款保留默认十分钟，超时释放时段和草稿绑定。token 位于 URL fragment，数据库只保存 token 哈希。
 
 后端正在运行时可执行真实开发库闭环探针。它会创建一条明确标记为 `M3 演示` 的未来预约，不打印服务令牌、管理员令牌或客户访问 token：
 
@@ -175,7 +176,7 @@ M3 业务入口保持在确定性 HTTP 层，尚未暴露给实时模型：
 .\scripts\probe-m3-booking.ps1
 ```
 
-探针会输出预约 ID、确认编号，以及幂等重试、状态、客户和商家读取是否都指向同一记录。M3 不含支付；实时对话中的信息采集、摘要播报与确认语义属于 M4。
+探针会输出预约 ID、参考号和付款后的确认编号，并验证确认前待付款、模拟付款后成功，以及状态、客户和商家读取都指向同一记录。该付款仅供本地验收，不连接真实支付平台；实时对话中的信息采集、摘要播报与确认语义属于 M4。
 
 ## M1 真人语音检查
 

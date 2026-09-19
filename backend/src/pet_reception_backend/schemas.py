@@ -414,20 +414,34 @@ class BookingRecord(BaseModel):
     starts_at: datetime
     ends_at: datetime
     merchant_time_zone: str
-    confirmation_code: str
-    status: Literal["confirmed"]
+    customer_reference: str
+    confirmation_code: str | None
+    payment_expires_at: datetime | None
+    paid_at: datetime | None
+    payment_expired_at: datetime | None
+    payment_method: str | None
+    status: Literal["awaiting_payment", "confirmed", "payment_expired"]
     created_at: datetime
 
 
 class CustomerBookingCredential(BaseModel):
-    confirmation_code: str
+    booking_reference: str
+    confirmation_code: str | None
     access_token: str
     credential_url: str
 
 
 class BookingOperationResult(BaseModel):
     operation_id: UUID
-    status: Literal["prepared", "presented", "confirmed", "expired", "cancelled"]
+    status: Literal[
+        "prepared",
+        "presented",
+        "awaiting_payment",
+        "confirmed",
+        "payment_expired",
+        "expired",
+        "cancelled",
+    ]
     preparation: BookingPreparation | None = None
     booking: BookingRecord | None = None
     customer_credential: CustomerBookingCredential | None = None

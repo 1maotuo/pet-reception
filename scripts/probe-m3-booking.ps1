@@ -66,7 +66,10 @@ $merchantId = Get-DotEnvValue 'DEMO_MERCHANT_ID'
 if (-not $merchantId) { $merchantId = 'demo-grooming-001' }
 
 $suffix = [guid]::NewGuid().ToString('N')
-$targetDate = Get-DateOnOrAfter ([DateTime]::UtcNow.Date.AddDays(180)) Tuesday
+# Spread repeatable development probes over future weeks so old probe records
+# do not eventually consume every candidate on one hard-coded date.
+$weekOffset = 26 + ([Convert]::ToInt32($suffix.Substring(0, 2), 16) % 104)
+$targetDate = Get-DateOnOrAfter ([DateTime]::UtcNow.Date.AddDays(7 * $weekOffset)) Tuesday
 $voiceHeaders = @{
     Authorization = "Bearer $serviceToken"
     'X-Merchant-ID' = $merchantId
@@ -135,7 +138,7 @@ $confirmationHeaders['X-Confirmation-Event-ID'] = "m3_probe_confirmation_$suffix
 $confirmPayload = @{
     expected_draft_version = $prepared.preparation.draft_version
 } | ConvertTo-Json
-$confirmed = Invoke-JsonRequest `
+$awaitingPayment = Invoke-JsonRequest `
     -Uri "$BackendUrl/api/internal/voice/booking-preparations/$($prepared.preparation.id)/confirm" `
     -Method Post `
     -Headers $confirmationHeaders `
@@ -145,34 +148,50 @@ $retried = Invoke-JsonRequest `
     -Method Post `
     -Headers $confirmationHeaders `
     -Body $confirmPayload
-$status = Invoke-JsonRequest `
+$statusBeforePayment = Invoke-JsonRequest `
     -Uri "$BackendUrl/api/internal/voice/booking-operations/$($prepared.operation_id)" `
     -Headers $confirmationHeaders
 
 $customerHeaders = @{
-    Authorization = "Bearer $($confirmed.customer_credential.access_token)"
+    Authorization = "Bearer $($awaitingPayment.customer_credential.access_token)"
 }
-$customer = Invoke-JsonRequest `
-    -Uri "$BackendUrl/api/customer/bookings/$($confirmed.customer_credential.confirmation_code)" `
+$customerBeforePayment = Invoke-JsonRequest `
+    -Uri "$BackendUrl/api/customer/bookings/$($awaitingPayment.customer_credential.booking_reference)" `
+    -Headers $customerHeaders
+$paymentHeaders = $customerHeaders.Clone()
+$paymentHeaders['X-Payment-Event-ID'] = "m3_probe_payment_$suffix"
+$paid = Invoke-JsonRequest `
+    -Uri "$BackendUrl/api/customer/bookings/$($awaitingPayment.customer_credential.booking_reference)/simulate-payment" `
+    -Method Post `
+    -Headers $paymentHeaders
+$statusAfterPayment = Invoke-JsonRequest `
+    -Uri "$BackendUrl/api/internal/voice/booking-operations/$($prepared.operation_id)" `
+    -Headers $confirmationHeaders
+$customerAfterPayment = Invoke-JsonRequest `
+    -Uri "$BackendUrl/api/customer/bookings/$($awaitingPayment.customer_credential.booking_reference)" `
     -Headers $customerHeaders
 $adminHeaders = @{
     Authorization = "Bearer $adminToken"
     'X-Merchant-ID' = $merchantId
 }
 $merchant = Invoke-JsonRequest `
-    -Uri "$BackendUrl/api/internal/merchant/bookings/$($confirmed.booking.id)" `
+    -Uri "$BackendUrl/api/internal/merchant/bookings/$($paid.booking.id)" `
     -Headers $adminHeaders
 
 [PSCustomObject]@{
     PreparedStatus = $prepared.status
     PresentedStatus = $presented.status
-    ConfirmedStatus = $confirmed.status
-    BookingId = $confirmed.booking.id
-    ConfirmationCode = $confirmed.booking.confirmation_code
-    IdempotentRetrySameBooking = ($retried.booking.id -eq $confirmed.booking.id)
-    StatusReadSameBooking = ($status.booking.id -eq $confirmed.booking.id)
-    CustomerReadSameBooking = ($customer.booking.id -eq $confirmed.booking.id)
-    MerchantReadSameBooking = ($merchant.booking.id -eq $confirmed.booking.id)
-    CustomerCredentialIssued = [bool]$confirmed.customer_credential.access_token
-    CustomerUrlAvailable = [bool]$confirmed.customer_credential.credential_url
+    ConfirmationStatus = $awaitingPayment.status
+    PaymentStatus = $paid.booking.status
+    BookingId = $paid.booking.id
+    BookingReference = $awaitingPayment.customer_credential.booking_reference
+    ConfirmationCode = $paid.booking.confirmation_code
+    IdempotentRetrySameBooking = ($retried.booking.id -eq $awaitingPayment.booking.id)
+    StatusBeforePaymentWasPending = ($statusBeforePayment.status -eq 'awaiting_payment')
+    CustomerBeforePaymentWasPending = ($customerBeforePayment.booking.status -eq 'awaiting_payment')
+    StatusAfterPaymentSameBooking = ($statusAfterPayment.booking.id -eq $paid.booking.id)
+    CustomerAfterPaymentSameBooking = ($customerAfterPayment.booking.id -eq $paid.booking.id)
+    MerchantReadSameBooking = ($merchant.booking.id -eq $paid.booking.id)
+    CustomerCredentialIssued = [bool]$awaitingPayment.customer_credential.access_token
+    CustomerUrlAvailable = [bool]$awaitingPayment.customer_credential.credential_url
 }

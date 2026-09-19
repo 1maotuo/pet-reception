@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from typing import Protocol
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -22,11 +22,15 @@ from .booking_service import (
     BookingConfirmationConflictError,
     BookingCredentialError,
     BookingNeedsInputError,
+    BookingPaymentConflictError,
+    BookingPaymentExpiredError,
     BookingPreparationExpiredError,
     BookingPreparationNotFoundError,
     BookingPreparationNotPresentedError,
     BookingService,
     CandidateUnavailableError,
+    active_booking_condition,
+    expire_unpaid_booking,
 )
 from .models import (
     availability_candidates,
@@ -164,7 +168,14 @@ class DataStore(Protocol):
     ) -> BookingOperationResult: ...
 
     def get_customer_booking(
-        self, confirmation_code: str, access_token: str
+        self, customer_reference: str, access_token: str
+    ) -> BookingRecord: ...
+
+    def simulate_payment(
+        self,
+        customer_reference: str,
+        access_token: str,
+        payment_event_id: str,
     ) -> BookingRecord: ...
 
     def list_merchant_bookings(self, merchant_id: str) -> MerchantBookingList: ...
@@ -183,6 +194,7 @@ class PostgresStore:
         ),
         now_provider: Callable[[ZoneInfo], datetime] = datetime.now,
         booking_hold_minutes: int = 5,
+        payment_hold_minutes: int = 10,
         booking_credential_secret: str = "",
         web_origin: str = "http://127.0.0.1:5173",
     ) -> None:
@@ -192,6 +204,7 @@ class PostgresStore:
         self.booking_service = BookingService(
             engine,
             hold_minutes=booking_hold_minutes,
+            payment_hold_minutes=payment_hold_minutes,
             credential_secret=booking_credential_secret,
             web_origin=web_origin,
             now_provider=lambda: self.now_provider(ZoneInfo("UTC")),
@@ -535,6 +548,16 @@ class PostgresStore:
             "voice_session_id": context.voice_session_id,
         }
 
+    @staticmethod
+    def _lock_merchant(connection, merchant_id: str) -> None:
+        merchant_id_result = connection.execute(
+            select(merchants.c.id)
+            .where(merchants.c.id == merchant_id)
+            .with_for_update()
+        ).scalar_one_or_none()
+        if merchant_id_result is None:
+            raise MerchantNotFoundError(merchant_id)
+
     def _ensure_draft(self, connection, context: VoiceRequestContext) -> None:
         merchant_exists = connection.execute(
             select(merchants.c.id).where(merchants.c.id == context.merchant_id)
@@ -565,13 +588,22 @@ class PostgresStore:
 
     def get_or_create_draft(self, context: VoiceRequestContext) -> BookingDraft:
         with self.engine.begin() as connection:
-            connection.execute(
-                select(merchants.c.id)
-                .where(merchants.c.id == context.merchant_id)
-                .with_for_update()
-            ).scalar_one_or_none()
+            self._lock_merchant(connection, context.merchant_id)
             self._ensure_draft(connection, context)
             row = self._select_draft(connection, context, for_update=True)
+            if row["booking_id"] is not None:
+                booking = connection.execute(
+                    select(bookings)
+                    .where(bookings.c.id == row["booking_id"])
+                    .with_for_update()
+                ).mappings().one_or_none()
+                if booking is not None:
+                    expire_unpaid_booking(
+                        connection,
+                        booking,
+                        self.now_provider(ZoneInfo("UTC")),
+                    )
+                    row = self._select_draft(connection, context, for_update=True)
             if row["pending_preparation_id"] is not None:
                 pending = connection.execute(
                     select(booking_preparations).where(
@@ -579,16 +611,20 @@ class PostgresStore:
                     )
                 ).mappings().one_or_none()
                 merchant_now = self.now_provider(ZoneInfo("UTC"))
-                if (
-                    pending is not None
-                    and pending["status"] in {"prepared", "presented"}
-                    and pending["expires_at"] <= merchant_now
-                ):
-                    connection.execute(
-                        booking_preparations.update()
-                        .where(booking_preparations.c.id == pending["id"])
-                        .values(status="expired", updated_at=func.now())
+                pending_is_expired = pending is not None and (
+                    pending["status"] == "expired"
+                    or (
+                        pending["status"] in {"prepared", "presented"}
+                        and pending["expires_at"] <= merchant_now
                     )
+                )
+                if pending_is_expired:
+                    if pending["status"] != "expired":
+                        connection.execute(
+                            booking_preparations.update()
+                            .where(booking_preparations.c.id == pending["id"])
+                            .values(status="expired", updated_at=func.now())
+                        )
                     connection.execute(
                         booking_drafts.update()
                         .where(booking_drafts.c.id == row["id"])
@@ -609,17 +645,26 @@ class PostgresStore:
         changes: dict[DraftFieldName, object],
     ) -> tuple[BookingDraft, list[DraftFieldName]]:
         with self.engine.begin() as connection:
-            connection.execute(
-                select(merchants.c.id)
-                .where(merchants.c.id == context.merchant_id)
-                .with_for_update()
-            ).scalar_one_or_none()
+            self._lock_merchant(connection, context.merchant_id)
             self._ensure_draft(connection, context)
             current = self._select_draft(connection, context, for_update=True)
-            if current["version"] != expected_version:
-                raise DraftVersionConflictError(current_version=current["version"])
+            if current["booking_id"] is not None:
+                booking = connection.execute(
+                    select(bookings)
+                    .where(bookings.c.id == current["booking_id"])
+                    .with_for_update()
+                ).mappings().one_or_none()
+                if booking is not None:
+                    expire_unpaid_booking(
+                        connection,
+                        booking,
+                        self.now_provider(ZoneInfo("UTC")),
+                    )
+                    current = self._select_draft(connection, context, for_update=True)
             if current["booking_id"] is not None:
                 raise BookingAlreadySubmittedError(str(current["booking_id"]))
+            if current["version"] != expected_version:
+                raise DraftVersionConflictError(current_version=current["version"])
 
             normalized_changes = dict(changes)
             preference_changed = (
@@ -717,6 +762,55 @@ class PostgresStore:
             updated = self._select_draft(connection, context)
         return BookingDraft.model_validate(dict(updated)), changed_fields
 
+    @staticmethod
+    def _occupied_intervals(connection, merchant_id: str, now_utc: datetime):
+        booked_rows = connection.execute(
+            select(
+                bookings.c.staff_id,
+                bookings.c.busy_starts_at,
+                bookings.c.busy_ends_at,
+            ).where(
+                bookings.c.merchant_id == merchant_id,
+                bookings.c.busy_ends_at > now_utc,
+                active_booking_condition(now_utc),
+            )
+        ).mappings()
+        held_rows = connection.execute(
+            select(
+                booking_preparations.c.staff_id,
+                booking_preparations.c.busy_starts_at,
+                booking_preparations.c.busy_ends_at,
+            ).where(
+                booking_preparations.c.merchant_id == merchant_id,
+                booking_preparations.c.status.in_(["prepared", "presented"]),
+                booking_preparations.c.expires_at > now_utc,
+            )
+        ).mappings()
+        return [
+            OccupiedInterval(
+                staff_id=row["staff_id"],
+                busy_starts_at=row["busy_starts_at"],
+                busy_ends_at=row["busy_ends_at"],
+            )
+            for row in [*booked_rows, *held_rows]
+        ]
+
+    @staticmethod
+    def _interval_is_available(
+        staff_id: str,
+        busy_starts_at: datetime,
+        busy_ends_at: datetime,
+        occupied: list[OccupiedInterval],
+    ) -> bool:
+        busy_start_utc = busy_starts_at.astimezone(timezone.utc)
+        busy_end_utc = busy_ends_at.astimezone(timezone.utc)
+        return not any(
+            interval.staff_id == staff_id
+            and busy_start_utc < interval.busy_ends_at.astimezone(timezone.utc)
+            and interval.busy_starts_at.astimezone(timezone.utc) < busy_end_utc
+            for interval in occupied
+        )
+
     def _load_availability_inputs(
         self,
         context: VoiceRequestContext,
@@ -803,35 +897,11 @@ class PostgresStore:
                 for row in rows
             ]
             now_utc = self.now_provider(ZoneInfo("UTC"))
-            booked_rows = connection.execute(
-                select(
-                    bookings.c.staff_id,
-                    bookings.c.busy_starts_at,
-                    bookings.c.busy_ends_at,
-                ).where(
-                    bookings.c.merchant_id == context.merchant_id,
-                    bookings.c.busy_ends_at > now_utc,
-                )
-            ).mappings()
-            held_rows = connection.execute(
-                select(
-                    booking_preparations.c.staff_id,
-                    booking_preparations.c.busy_starts_at,
-                    booking_preparations.c.busy_ends_at,
-                ).where(
-                    booking_preparations.c.merchant_id == context.merchant_id,
-                    booking_preparations.c.status.in_(["prepared", "presented"]),
-                    booking_preparations.c.expires_at > now_utc,
-                )
-            ).mappings()
-            occupied = [
-                OccupiedInterval(
-                    staff_id=row["staff_id"],
-                    busy_starts_at=row["busy_starts_at"],
-                    busy_ends_at=row["busy_ends_at"],
-                )
-                for row in [*booked_rows, *held_rows]
-            ]
+            occupied = self._occupied_intervals(
+                connection,
+                context.merchant_id,
+                now_utc,
+            )
         return draft, dict(merchant), dict(service), windows, occupied
 
     def search_availability(
@@ -896,30 +966,68 @@ class PostgresStore:
             candidate_values.append(value)
             candidate_models.append(AvailabilityCandidate.model_validate(value))
 
-        alternative_values = [
-            {
-                "date": alternative.date.isoformat(),
-                "first_start_at": alternative.first_start_at.isoformat(),
-                "available_staff_ids": list(alternative.available_staff_ids),
-            }
-            for alternative in alternatives
-        ]
-        status = "available" if candidates else "no_availability"
         with self.engine.begin() as connection:
+            self._lock_merchant(connection, context.merchant_id)
             current = self._select_draft(connection, context, for_update=True)
             if current["availability_revision"] != expected_availability_revision:
                 raise AvailabilityRevisionConflictError(
                     current_revision=current["availability_revision"]
                 )
             current_schedule_revision = connection.execute(
-                select(merchants.c.schedule_revision)
-                .where(merchants.c.id == context.merchant_id)
-                .with_for_update()
+                select(merchants.c.schedule_revision).where(
+                    merchants.c.id == context.merchant_id
+                )
             ).scalar_one()
             if current_schedule_revision != merchant["schedule_revision"]:
                 raise AvailabilityScheduleChangedError(
                     current_revision=current_schedule_revision
                 )
+            current_occupied = self._occupied_intervals(
+                connection,
+                context.merchant_id,
+                self.now_provider(ZoneInfo("UTC")),
+            )
+            available_ids = {
+                value["id"]
+                for value in candidate_values
+                if self._interval_is_available(
+                    value["staff_id"],
+                    value["busy_starts_at"],
+                    value["busy_ends_at"],
+                    current_occupied,
+                )
+            }
+            candidate_values = [
+                value for value in candidate_values if value["id"] in available_ids
+            ]
+            candidate_models = [
+                candidate for candidate in candidate_models if candidate.id in available_ids
+            ]
+            if candidate_values:
+                alternatives = []
+            else:
+                alternatives = find_alternative_dates(
+                    requested_date=draft["preferred_date"],
+                    alternative_days=merchant["alternative_days"],
+                    candidate_limit=merchant["candidate_limit"],
+                    merchant_time_zone=merchant["time_zone"],
+                    duration_minutes=service["duration_minutes"],
+                    buffer_before_minutes=service["buffer_before_minutes"],
+                    buffer_after_minutes=service["buffer_after_minutes"],
+                    slot_interval_minutes=merchant["slot_interval_minutes"],
+                    preferred_time_of_day=draft["preferred_time_of_day"],
+                    windows=windows,
+                    occupied_intervals=current_occupied,
+                )
+            alternative_values = [
+                {
+                    "date": alternative.date.isoformat(),
+                    "first_start_at": alternative.first_start_at.isoformat(),
+                    "available_staff_ids": list(alternative.available_staff_ids),
+                }
+                for alternative in alternatives
+            ]
+            status = "available" if candidate_values else "no_availability"
             connection.execute(
                 availability_searches.insert().values(
                     id=search_id,
@@ -971,6 +1079,7 @@ class PostgresStore:
         search_id: UUID,
     ) -> AvailabilitySearchResult:
         with self.engine.begin() as connection:
+            self._lock_merchant(connection, context.merchant_id)
             self._ensure_draft(connection, context)
             draft = self._select_draft(connection, context)
             current_schedule_revision = connection.execute(
@@ -1003,6 +1112,8 @@ class PostgresStore:
             )
             snapshot_is_current = schedule_is_current and draft_is_current
             candidate_rows = []
+            occupied = []
+            service = None
             if snapshot_is_current:
                 candidate_rows = list(
                     connection.execute(
@@ -1011,14 +1122,42 @@ class PostgresStore:
                         .order_by(availability_candidates.c.display_order)
                     ).mappings()
                 )
+                occupied = self._occupied_intervals(
+                    connection,
+                    context.merchant_id,
+                    self.now_provider(ZoneInfo("UTC")),
+                )
+                service = connection.execute(
+                    select(
+                        merchant_services.c.duration_minutes,
+                        merchant_services.c.buffer_before_minutes,
+                        merchant_services.c.buffer_after_minutes,
+                    ).where(
+                        merchant_services.c.merchant_id == context.merchant_id,
+                        merchant_services.c.id == search["service_id"],
+                    )
+                ).mappings().one_or_none()
 
         zone = ZoneInfo(search["merchant_time_zone"])
         merchant_now = self.now_provider(zone)
-        candidate_rows = [
+        candidate_rows_before_occupancy = [
             row
             for row in candidate_rows
             if row["starts_at"].astimezone(zone) >= merchant_now
         ]
+        candidate_rows = [
+            row
+            for row in candidate_rows_before_occupancy
+            if self._interval_is_available(
+                row["staff_id"],
+                row["busy_starts_at"],
+                row["busy_ends_at"],
+                occupied,
+            )
+        ]
+        candidates_removed_by_occupancy = (
+            bool(candidate_rows_before_occupancy) and not candidate_rows
+        )
         alternatives = (
             [
                 AlternativeAvailabilityDate.model_validate(value)
@@ -1032,6 +1171,36 @@ class PostgresStore:
             for alternative in alternatives
             if alternative.first_start_at.astimezone(zone) >= merchant_now
         ]
+        if service is not None:
+            refreshed_alternatives = []
+            for alternative in alternatives:
+                service_start_utc = alternative.first_start_at.astimezone(timezone.utc)
+                busy_start = service_start_utc - timedelta(
+                    minutes=service["buffer_before_minutes"]
+                )
+                busy_end = service_start_utc + timedelta(
+                    minutes=(
+                        service["duration_minutes"]
+                        + service["buffer_after_minutes"]
+                    )
+                )
+                available_staff_ids = [
+                    staff_id
+                    for staff_id in alternative.available_staff_ids
+                    if self._interval_is_available(
+                        staff_id,
+                        busy_start,
+                        busy_end,
+                        occupied,
+                    )
+                ]
+                if available_staff_ids:
+                    refreshed_alternatives.append(
+                        alternative.model_copy(
+                            update={"available_staff_ids": available_staff_ids}
+                        )
+                    )
+            alternatives = refreshed_alternatives
         time_is_current = search["preferred_date"] >= merchant_now.date()
         if search["status"] == "available":
             time_is_current = time_is_current and bool(candidate_rows)
@@ -1066,7 +1235,11 @@ class PostgresStore:
                     else (
                         "draft_availability_changed"
                         if not draft_is_current
-                        else "availability_expired"
+                        else (
+                            "availability_occupied"
+                            if candidates_removed_by_occupancy
+                            else "availability_expired"
+                        )
                     )
                 )
             ),
@@ -1133,12 +1306,24 @@ class PostgresStore:
 
     def get_customer_booking(
         self,
-        confirmation_code: str,
+        customer_reference: str,
         access_token: str,
     ) -> BookingRecord:
         return self.booking_service.get_customer_booking(
-            confirmation_code,
+            customer_reference,
             access_token,
+        )
+
+    def simulate_payment(
+        self,
+        customer_reference: str,
+        access_token: str,
+        payment_event_id: str,
+    ) -> BookingRecord:
+        return self.booking_service.simulate_payment(
+            customer_reference,
+            access_token,
+            payment_event_id,
         )
 
     def list_merchant_bookings(self, merchant_id: str) -> MerchantBookingList:

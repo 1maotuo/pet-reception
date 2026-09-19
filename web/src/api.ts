@@ -25,8 +25,13 @@ export type BookingRecord = {
   starts_at: string
   ends_at: string
   merchant_time_zone: string
-  confirmation_code: string
-  status: 'confirmed'
+  customer_reference: string
+  confirmation_code: string | null
+  payment_expires_at: string | null
+  paid_at: string | null
+  payment_expired_at: string | null
+  payment_method: string | null
+  status: 'awaiting_payment' | 'confirmed' | 'payment_expired'
 }
 
 const backendBaseUrl = (import.meta.env.VITE_BACKEND_URL ?? '').replace(/\/$/, '')
@@ -43,12 +48,12 @@ export async function fetchSystemStatus(signal?: AbortSignal): Promise<SystemSta
 }
 
 export async function fetchCustomerBooking(
-  confirmationCode: string,
+  bookingReference: string,
   accessToken: string,
   signal?: AbortSignal,
 ): Promise<BookingRecord> {
   const response = await fetch(
-    `${backendBaseUrl}/api/customer/bookings/${encodeURIComponent(confirmationCode)}`,
+    `${backendBaseUrl}/api/customer/bookings/${encodeURIComponent(bookingReference)}`,
     {
       headers: {
         Accept: 'application/json',
@@ -62,6 +67,41 @@ export async function fetchCustomerBooking(
       response.status === 404
         ? '预约凭证无效或预约不存在'
         : `预约结果接口返回 HTTP ${response.status}`,
+    )
+  }
+  const result = await response.json() as { booking: BookingRecord }
+  return result.booking
+}
+
+export async function simulateCustomerPayment(
+  bookingReference: string,
+  accessToken: string,
+): Promise<BookingRecord> {
+  const response = await fetch(
+    `${backendBaseUrl}/api/customer/bookings/${encodeURIComponent(bookingReference)}/simulate-payment`,
+    {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${accessToken}`,
+        'X-Payment-Event-ID': `web-payment-${crypto.randomUUID()}`,
+      },
+    },
+  )
+  if (!response.ok) {
+    let code = ''
+    try {
+      const body = await response.json() as { detail?: { code?: string } }
+      code = body.detail?.code ?? ''
+    } catch {
+      // A proxy may return a non-JSON error; preserve the HTTP error below.
+    }
+    throw new Error(
+      code === 'payment_expired'
+        ? '支付保留已过期，请重新预约'
+        : response.status === 404
+          ? '预约凭证无效或预约不存在'
+          : `模拟支付接口返回 HTTP ${response.status}`,
     )
   }
   const result = await response.json() as { booking: BookingRecord }

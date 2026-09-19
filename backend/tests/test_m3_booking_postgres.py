@@ -1,23 +1,30 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
-from threading import Barrier
+from threading import Barrier, Event
+from time import sleep
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 
 from pet_reception_backend.app import create_app
 from pet_reception_backend.config import Settings
 from pet_reception_backend.database import DatabaseProbe
 from pet_reception_backend.manage import ensure_test_database, setup_database
-from pet_reception_backend.models import booking_preparations, bookings
+from pet_reception_backend.models import (
+    booking_drafts,
+    booking_preparations,
+    bookings,
+    merchants,
+)
 from pet_reception_backend.schemas import VoiceRequestContext
 from pet_reception_backend.store import (
     BookingAlreadySubmittedError,
     BookingConfirmationConflictError,
+    BookingPreparationExpiredError,
     CandidateUnavailableError,
     PostgresStore,
 )
@@ -147,6 +154,72 @@ def build_preparation(
     return trusted_headers, candidate, prepare_response.json()
 
 
+def build_search(
+    client: TestClient,
+    preferred_date: date,
+    *,
+    headers: dict[str, str] | None = None,
+    service_id: str = "demo-bath",
+    preferred_time_of_day: str = "morning",
+    customer_name: str = "Review 客户",
+) -> tuple[dict[str, str], dict, dict]:
+    trusted_headers = headers or voice_headers()
+    draft_response = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=trusted_headers,
+        json={
+            "expected_version": 0,
+            "customer_name": customer_name,
+            "contact_phone": "+86-138-2222-2222",
+            "pet_name": f"{customer_name}的宠物",
+            "pet_species": "犬",
+            "service_id": service_id,
+            "preferred_date": preferred_date.isoformat(),
+            "preferred_time_of_day": preferred_time_of_day,
+            "staff_preference_text": "Lisa",
+            "staff_id": "demo-staff-lisa",
+        },
+    )
+    assert draft_response.status_code == 200, draft_response.text
+    draft = draft_response.json()["draft"]
+    search_response = client.post(
+        "/api/internal/voice/availability-searches",
+        headers=trusted_headers,
+        json={"expected_availability_revision": draft["availability_revision"]},
+    )
+    assert search_response.status_code == 200, search_response.text
+    return trusted_headers, draft, search_response.json()["search"]
+
+
+def prepare_candidate(
+    client: TestClient,
+    headers: dict[str, str],
+    draft: dict,
+    candidate: dict,
+) -> dict:
+    response = client.post(
+        "/api/internal/voice/booking-preparations",
+        headers=headers,
+        json={
+            "expected_version": draft["version"],
+            "candidate_id": candidate["id"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def confirm_prepared(
+    client: TestClient,
+    headers: dict[str, str],
+    prepared: dict,
+) -> dict:
+    mark_presented(client, headers, prepared)
+    response = confirm(client, headers, prepared)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def mark_presented(
     client: TestClient,
     headers: dict[str, str],
@@ -239,11 +312,13 @@ def test_confirmation_gate_idempotency_and_same_record_views(environment) -> Non
         confirmation_event_id=event_id,
     )
     assert confirmed_response.status_code == 200, confirmed_response.text
-    confirmed = confirmed_response.json()
-    assert confirmed["status"] == "confirmed"
-    assert confirmed["booking"]["status"] == "confirmed"
-    assert confirmed["customer_credential"]["confirmation_code"].startswith("PR-")
-    assert "#token=" in confirmed["customer_credential"]["credential_url"]
+    awaiting = confirmed_response.json()
+    assert awaiting["status"] == "awaiting_payment"
+    assert awaiting["booking"]["status"] == "awaiting_payment"
+    assert awaiting["booking"]["confirmation_code"] is None
+    assert awaiting["customer_credential"]["confirmation_code"] is None
+    assert awaiting["customer_credential"]["booking_reference"].startswith("BK-")
+    assert "#token=" in awaiting["customer_credential"]["credential_url"]
 
     retried = confirm(
         client,
@@ -252,8 +327,51 @@ def test_confirmation_gate_idempotency_and_same_record_views(environment) -> Non
         confirmation_event_id=f"confirmation_{uuid4().hex}",
     )
     assert retried.status_code == 200
-    assert retried.json()["booking"] == confirmed["booking"]
-    assert retried.json()["customer_credential"] == confirmed["customer_credential"]
+    assert retried.json()["booking"] == awaiting["booking"]
+    assert retried.json()["customer_credential"] == awaiting["customer_credential"]
+
+    credential = awaiting["customer_credential"]
+    customer_pending = client.get(
+        f"/api/customer/bookings/{credential['booking_reference']}",
+        headers={"Authorization": f"Bearer {credential['access_token']}"},
+    )
+    assert customer_pending.status_code == 200
+    assert customer_pending.json()["booking"] == awaiting["booking"]
+
+    payment_event_id = f"payment_{uuid4().hex}"
+    paid_response = client.post(
+        f"/api/customer/bookings/{credential['booking_reference']}/simulate-payment",
+        headers={
+            "Authorization": f"Bearer {credential['access_token']}",
+            "X-Payment-Event-ID": payment_event_id,
+        },
+    )
+    assert paid_response.status_code == 200, paid_response.text
+    confirmed_booking = paid_response.json()["booking"]
+    assert confirmed_booking["status"] == "confirmed"
+    assert confirmed_booking["confirmation_code"].startswith("PR-")
+    assert confirmed_booking["payment_method"] == "local_simulation"
+    assert confirmed_booking["paid_at"] is not None
+
+    paid_retry = client.post(
+        f"/api/customer/bookings/{credential['booking_reference']}/simulate-payment",
+        headers={
+            "Authorization": f"Bearer {credential['access_token']}",
+            "X-Payment-Event-ID": f"payment_{uuid4().hex}",
+        },
+    )
+    assert paid_retry.status_code == 200
+    assert paid_retry.json()["booking"] == confirmed_booking
+
+    confirmed = {
+        **awaiting,
+        "status": "confirmed",
+        "booking": confirmed_booking,
+        "customer_credential": {
+            **credential,
+            "confirmation_code": confirmed_booking["confirmation_code"],
+        },
+    }
 
     status_response = client.get(
         f"/api/internal/voice/booking-operations/{confirmed['operation_id']}",
@@ -263,16 +381,15 @@ def test_confirmation_gate_idempotency_and_same_record_views(environment) -> Non
     assert status_response.json()["booking"] == confirmed["booking"]
     assert status_response.json()["customer_credential"] == confirmed["customer_credential"]
 
-    credential = confirmed["customer_credential"]
     customer = client.get(
-        f"/api/customer/bookings/{credential['confirmation_code']}",
+        f"/api/customer/bookings/{credential['booking_reference']}",
         headers={"Authorization": f"Bearer {credential['access_token']}"},
     )
     assert customer.status_code == 200
     assert customer.json()["booking"] == confirmed["booking"]
     assert "customer_access_token_hash" not in customer.text
     assert client.get(
-        f"/api/customer/bookings/{credential['confirmation_code']}",
+        f"/api/customer/bookings/{credential['booking_reference']}",
         headers={"Authorization": "Bearer wrong-token"},
     ).status_code == 404
 
@@ -325,7 +442,94 @@ def test_confirmation_gate_idempotency_and_same_record_views(environment) -> Non
         UUID(confirmed["operation_id"]),
     )
     assert restarted_status.booking.model_dump(mode="json") == confirmed["booking"]
-    assert restarted_status.customer_credential.model_dump(mode="json") == credential
+    assert (
+        restarted_status.customer_credential.model_dump(mode="json")
+        == confirmed["customer_credential"]
+    )
+
+
+def test_payment_expiry_releases_draft_and_rejects_late_payment(environment) -> None:
+    client, store, _ = environment
+    preferred_date = next_tuesday(77)
+    headers, candidate, prepared = build_preparation(client, preferred_date)
+    awaiting = confirm_prepared(client, headers, prepared)
+    credential = awaiting["customer_credential"]
+    booking_id = UUID(awaiting["booking"]["id"])
+
+    with store.engine.begin() as connection:
+        connection.execute(
+            bookings.update()
+            .where(bookings.c.id == booking_id)
+            .values(payment_expires_at=datetime.now(ZoneInfo("UTC")) - timedelta(seconds=1))
+        )
+
+    late_payment = client.post(
+        f"/api/customer/bookings/{credential['booking_reference']}/simulate-payment",
+        headers={
+            "Authorization": f"Bearer {credential['access_token']}",
+            "X-Payment-Event-ID": f"payment_{uuid4().hex}",
+        },
+    )
+    assert late_payment.status_code == 409
+    assert late_payment.json()["detail"]["code"] == "payment_expired"
+
+    customer = client.get(
+        f"/api/customer/bookings/{credential['booking_reference']}",
+        headers={"Authorization": f"Bearer {credential['access_token']}"},
+    )
+    assert customer.status_code == 200
+    assert customer.json()["booking"]["status"] == "payment_expired"
+    assert customer.json()["booking"]["confirmation_code"] is None
+
+    with store.engine.connect() as connection:
+        draft = connection.execute(
+            select(booking_drafts).where(
+                booking_drafts.c.merchant_id == MERCHANT_ID,
+                booking_drafts.c.owner_id == headers["X-Voice-Owner-ID"],
+                booking_drafts.c.voice_session_id == headers["X-Voice-Session-ID"],
+            )
+        ).mappings().one()
+    assert draft["booking_id"] is None
+    assert draft["selected_candidate_id"] is None
+
+    _, _, refreshed_search = build_search(client, preferred_date)
+    assert any(
+        value["starts_at"] == candidate["starts_at"]
+        and value["staff_id"] == candidate["staff_id"]
+        for value in refreshed_search["candidates"]
+    )
+
+
+def test_payment_event_cannot_be_reused_for_another_booking(environment) -> None:
+    client, _, _ = environment
+    first_headers, _, first_prepared = build_preparation(client, next_tuesday(84))
+    second_headers, _, second_prepared = build_preparation(client, next_tuesday(91))
+    first = confirm_prepared(client, first_headers, first_prepared)
+    second = confirm_prepared(client, second_headers, second_prepared)
+    event_id = f"payment_{uuid4().hex}"
+
+    first_credential = first["customer_credential"]
+    assert client.post(
+        f"/api/customer/bookings/{first_credential['booking_reference']}/simulate-payment",
+        headers={
+            "Authorization": f"Bearer {first_credential['access_token']}",
+            "X-Payment-Event-ID": event_id,
+        },
+    ).status_code == 200
+
+    second_credential = second["customer_credential"]
+    reused = client.post(
+        f"/api/customer/bookings/{second_credential['booking_reference']}/simulate-payment",
+        headers={
+            "Authorization": f"Bearer {second_credential['access_token']}",
+            "X-Payment-Event-ID": event_id,
+        },
+    )
+    assert reused.status_code == 409
+    assert reused.json()["detail"] == {
+        "code": "payment_conflict",
+        "reason": "payment_event_reused",
+    }
 
 
 def test_any_draft_change_invalidates_prepared_snapshot(environment) -> None:
@@ -518,11 +722,377 @@ def test_concurrent_draft_change_and_confirmation_cannot_commit_both(environment
     if isinstance(update_result, Exception):
         assert isinstance(update_result, BookingAlreadySubmittedError)
         assert not isinstance(confirm_result, Exception)
-        assert confirm_result.status == "confirmed"
+        assert confirm_result.status == "awaiting_payment"
     else:
         assert isinstance(confirm_result, BookingConfirmationConflictError)
         assert str(confirm_result) in {"cancelled", "draft_version_changed"}
         assert update_result[0].contact_phone == "+86-137-0000-0000"
+
+
+def test_availability_save_locks_merchant_before_draft(environment) -> None:
+    _, store, _ = environment
+    trusted_context = VoiceRequestContext(
+        merchant_id=MERCHANT_ID,
+        owner_id=f"owner_{uuid4().hex}",
+        voice_session_id=f"session_{uuid4().hex}",
+        turn_id=f"turn_{uuid4().hex}",
+    )
+    initial = store.get_or_create_draft(trusted_context)
+    draft, _ = store.update_draft(
+        trusted_context,
+        initial.version,
+        {
+            "service_id": "demo-bath",
+            "preferred_date": next_tuesday(154),
+            "staff_id": "demo-staff-lisa",
+        },
+    )
+    lock_statements: list[str] = []
+
+    def record_lock_statement(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = statement.lower()
+        if "for update" in normalized:
+            lock_statements.append(normalized)
+
+    event.listen(store.engine, "before_cursor_execute", record_lock_statement)
+    try:
+        store.search_availability(trusted_context, draft.availability_revision)
+    finally:
+        event.remove(store.engine, "before_cursor_execute", record_lock_statement)
+
+    merchant_lock = next(
+        index
+        for index, statement in enumerate(lock_statements)
+        if "from merchants" in statement
+    )
+    draft_lock = next(
+        index
+        for index, statement in enumerate(lock_statements)
+        if "from booking_drafts" in statement
+    )
+    assert merchant_lock < draft_lock
+
+
+def test_saved_search_revalidates_holds_bookings_and_alternatives(environment) -> None:
+    client, store, _ = environment
+    held_date = next_tuesday(168)
+    waiting_headers, _, waiting_search = build_search(
+        client,
+        held_date,
+        customer_name="等待占位客户",
+    )
+    holder_headers, holder_draft, holder_search = build_search(
+        client,
+        held_date,
+        customer_name="占位客户",
+    )
+    held_start = waiting_search["candidates"][0]["starts_at"]
+    held = prepare_candidate(
+        client,
+        holder_headers,
+        holder_draft,
+        holder_search["candidates"][0],
+    )
+
+    reread_while_held = client.get(
+        f"/api/internal/voice/availability-searches/{waiting_search['id']}",
+        headers=waiting_headers,
+    ).json()["search"]
+    assert all(
+        candidate["starts_at"] != held_start
+        for candidate in reread_while_held["candidates"]
+    )
+
+    original_now_provider = store.now_provider
+    expires_at = datetime.fromisoformat(held["preparation"]["expires_at"])
+    store.now_provider = lambda zone: (expires_at + timedelta(seconds=1)).astimezone(zone)
+    try:
+        reread_after_expiry = client.get(
+            f"/api/internal/voice/availability-searches/{waiting_search['id']}",
+            headers=waiting_headers,
+        ).json()["search"]
+        assert any(
+            candidate["starts_at"] == held_start
+            for candidate in reread_after_expiry["candidates"]
+        )
+    finally:
+        store.now_provider = original_now_provider
+
+    booked_date = next_tuesday(182)
+    waiting_headers, _, waiting_search = build_search(
+        client,
+        booked_date,
+        customer_name="等待预约客户",
+    )
+    booker_headers, booker_draft, booker_search = build_search(
+        client,
+        booked_date,
+        customer_name="预约客户",
+    )
+    booked_start = waiting_search["candidates"][0]["starts_at"]
+    booked_preparation = prepare_candidate(
+        client,
+        booker_headers,
+        booker_draft,
+        booker_search["candidates"][0],
+    )
+    confirm_prepared(client, booker_headers, booked_preparation)
+    reread_after_booking = client.get(
+        f"/api/internal/voice/availability-searches/{waiting_search['id']}",
+        headers=waiting_headers,
+    ).json()["search"]
+    assert all(
+        candidate["starts_at"] != booked_start
+        for candidate in reread_after_booking["candidates"]
+    )
+
+    start = datetime.now(MERCHANT_ZONE).date() + timedelta(days=196)
+    closed_sunday = start + timedelta(days=(6 - start.weekday()) % 7)
+    alternative_headers, _, alternative_search = build_search(
+        client,
+        closed_sunday,
+        service_id="demo-full-groom",
+        preferred_time_of_day="flexible",
+        customer_name="替代日期客户",
+    )
+    assert alternative_search["status"] == "no_availability"
+    first_alternative = alternative_search["alternative_dates"][0]
+    holder_headers, holder_draft, holder_search = build_search(
+        client,
+        date.fromisoformat(first_alternative["date"]),
+        service_id="demo-full-groom",
+        preferred_time_of_day="flexible",
+        customer_name="替代日期占位客户",
+    )
+    alternative_hold = prepare_candidate(
+        client,
+        holder_headers,
+        holder_draft,
+        holder_search["candidates"][0],
+    )
+    refreshed_alternatives = client.get(
+        f"/api/internal/voice/availability-searches/{alternative_search['id']}",
+        headers=alternative_headers,
+    ).json()["search"]["alternative_dates"]
+    assert not any(
+        alternative["first_start_at"] == first_alternative["first_start_at"]
+        and "demo-staff-lisa" in alternative["available_staff_ids"]
+        for alternative in refreshed_alternatives
+    )
+    assert alternative_hold["status"] == "prepared"
+
+
+@pytest.mark.parametrize("conflict_kind", ["bookings", "holds"])
+def test_long_candidate_rejects_two_overlapping_conflicts(
+    environment,
+    conflict_kind: str,
+) -> None:
+    client, _, _ = environment
+    days = 210 if conflict_kind == "bookings" else 224
+    target_date = next_tuesday(days)
+    long_headers, long_draft, long_search = build_search(
+        client,
+        target_date,
+        service_id="demo-full-groom",
+        customer_name=f"长服务-{conflict_kind}",
+    )
+    long_candidate = long_search["candidates"][0]
+
+    first_headers, first_draft, first_search = build_search(
+        client,
+        target_date,
+        customer_name=f"短服务甲-{conflict_kind}",
+    )
+    first_prepared = prepare_candidate(
+        client,
+        first_headers,
+        first_draft,
+        first_search["candidates"][0],
+    )
+    if conflict_kind == "bookings":
+        confirm_prepared(client, first_headers, first_prepared)
+
+    second_headers, second_draft, second_search = build_search(
+        client,
+        target_date,
+        customer_name=f"短服务乙-{conflict_kind}",
+    )
+    overlapping_candidates = [
+        candidate
+        for candidate in second_search["candidates"]
+        if candidate["busy_starts_at"] < long_candidate["busy_ends_at"]
+        and candidate["busy_ends_at"] > long_candidate["busy_starts_at"]
+    ]
+    assert overlapping_candidates
+    second_prepared = prepare_candidate(
+        client,
+        second_headers,
+        second_draft,
+        overlapping_candidates[0],
+    )
+    if conflict_kind == "bookings":
+        confirm_prepared(client, second_headers, second_prepared)
+
+    rejected = client.post(
+        "/api/internal/voice/booking-preparations",
+        headers=long_headers,
+        json={
+            "expected_version": long_draft["version"],
+            "candidate_id": long_candidate["id"],
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"] == {
+        "code": "unavailable",
+        "reason": "candidate_conflict",
+    }
+
+
+def test_bulk_and_direct_expiry_clear_draft_references(environment) -> None:
+    client, store, _ = environment
+    target_date = next_tuesday(238)
+    first_headers, first_candidate, first_prepared = build_preparation(
+        client,
+        target_date,
+        customer_name="批量过期甲",
+    )
+    expires_at = datetime.fromisoformat(first_prepared["preparation"]["expires_at"])
+    original_now_provider = store.now_provider
+    store.now_provider = lambda zone: (expires_at + timedelta(seconds=1)).astimezone(zone)
+    try:
+        _, second_candidate, second_prepared = build_preparation(
+            client,
+            target_date,
+            customer_name="批量过期乙",
+        )
+        assert second_candidate["starts_at"] == first_candidate["starts_at"]
+        assert second_prepared["status"] == "prepared"
+        first_draft = client.get(
+            "/api/internal/voice/booking-draft",
+            headers=with_turn(first_headers),
+        ).json()["draft"]
+        assert first_draft["pending_preparation_id"] is None
+        assert first_draft["selected_candidate_id"] is None
+    finally:
+        store.now_provider = original_now_provider
+
+    direct_headers, _, direct_prepared = build_preparation(
+        client,
+        next_tuesday(252),
+        customer_name="直接过期客户",
+    )
+    mark_presented(client, direct_headers, direct_prepared)
+    direct_id = UUID(direct_prepared["preparation"]["id"])
+    direct_expiry = datetime.fromisoformat(
+        direct_prepared["preparation"]["expires_at"]
+    )
+    store.now_provider = lambda zone: (direct_expiry + timedelta(seconds=1)).astimezone(zone)
+    try:
+        rejected = confirm(client, direct_headers, direct_prepared)
+        assert rejected.status_code == 409
+        assert rejected.json()["detail"]["code"] == "expired"
+    finally:
+        store.now_provider = original_now_provider
+    with store.engine.connect() as connection:
+        status = connection.execute(
+            select(booking_preparations.c.status).where(
+                booking_preparations.c.id == direct_id
+            )
+        ).scalar_one()
+    direct_draft = client.get(
+        "/api/internal/voice/booking-draft",
+        headers=with_turn(direct_headers),
+    ).json()["draft"]
+    assert status == "expired"
+    assert direct_draft["pending_preparation_id"] is None
+    assert direct_draft["selected_candidate_id"] is None
+
+
+def test_confirmation_rechecks_expiry_after_lock_wait(environment) -> None:
+    client, store, configured = environment
+    headers, _, prepared = build_preparation(
+        client,
+        next_tuesday(266),
+        customer_name="锁等待过期客户",
+    )
+    mark_presented(client, headers, prepared)
+    preparation_id = UUID(prepared["preparation"]["id"])
+    base_now = datetime.now(ZoneInfo("UTC"))
+    clock = {"now": base_now}
+    with store.engine.begin() as connection:
+        connection.execute(
+            booking_preparations.update()
+            .where(booking_preparations.c.id == preparation_id)
+            .values(expires_at=base_now + timedelta(seconds=1))
+        )
+
+    waiting_store = PostgresStore(
+        store.engine,
+        now_provider=lambda zone: clock["now"].astimezone(zone),
+        booking_hold_minutes=5,
+        booking_credential_secret=configured.booking_credential_secret,
+        web_origin=configured.web_origin,
+    )
+    trusted_context = VoiceRequestContext(
+        merchant_id=MERCHANT_ID,
+        owner_id=headers["X-Voice-Owner-ID"],
+        voice_session_id=headers["X-Voice-Session-ID"],
+        turn_id=f"turn_{uuid4().hex}",
+    )
+    started = Event()
+
+    def confirm_while_waiting():
+        started.set()
+        try:
+            return waiting_store.confirm_booking(
+                trusted_context,
+                preparation_id,
+                prepared["preparation"]["draft_version"],
+                f"confirmation_{uuid4().hex}",
+            )
+        except Exception as error:  # Asserted in the parent thread.
+            return error
+
+    blocker = store.engine.connect()
+    transaction = blocker.begin()
+    blocker.execute(
+        select(merchants.c.id)
+        .where(merchants.c.id == MERCHANT_ID)
+        .with_for_update()
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(confirm_while_waiting)
+            assert started.wait(timeout=5)
+            sleep(0.25)
+            assert not future.done()
+            clock["now"] = base_now + timedelta(seconds=2)
+            transaction.commit()
+            result = future.result(timeout=10)
+    finally:
+        if transaction.is_active:
+            transaction.rollback()
+        blocker.close()
+
+    assert isinstance(result, BookingPreparationExpiredError)
+    with store.engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(bookings).where(
+                bookings.c.preparation_id == preparation_id
+            )
+        ).scalar_one() == 0
+        assert connection.execute(
+            select(booking_preparations.c.status).where(
+                booking_preparations.c.id == preparation_id
+            )
+        ).scalar_one() == "expired"
 
 
 def test_database_insert_failure_rolls_back_and_returns_no_credential(environment) -> None:

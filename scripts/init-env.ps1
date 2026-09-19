@@ -28,6 +28,9 @@ if (Test-Path -LiteralPath $envPath) {
     if ($existing -notmatch '(?m)^BOOKING_HOLD_MINUTES=') {
         $additions.Add('BOOKING_HOLD_MINUTES=5')
     }
+    if ($existing -notmatch '(?m)^PAYMENT_HOLD_MINUTES=') {
+        $additions.Add('PAYMENT_HOLD_MINUTES=10')
+    }
     if ($additions.Count -eq 0) {
         Write-Output '.env already contains the required generated values; no changes made.'
         exit 0

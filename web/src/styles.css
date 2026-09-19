@@ -84,6 +84,10 @@ h1 { margin: 0; font-size: clamp(2.6rem, 7vw, 5.8rem); line-height: 0.98; letter
 .booking-details dd { margin: 0; font-weight: 680; line-height: 1.5; }
 .credential-note { color: #66716d; font-size: 0.88rem; line-height: 1.6; }
 .booking-error { margin-top: 28px; padding: 18px 20px; border-radius: 14px; color: #8c321f; background: #fce7df; }
+.payment-panel { margin-top: 28px; padding: 22px 24px; border: 1px solid rgba(196, 93, 53, 0.25); border-radius: 18px; background: #fff8ef; }
+.payment-panel p { margin: 0 0 16px; color: #53615c; line-height: 1.6; }
+.payment-panel button { border: 0; border-radius: 999px; padding: 12px 20px; color: white; background: #c45d35; cursor: pointer; font-weight: 750; }
+.payment-panel button:disabled { cursor: wait; opacity: 0.65; }
 
 @media (max-width: 760px) {
   .shell { padding: 48px 0; }

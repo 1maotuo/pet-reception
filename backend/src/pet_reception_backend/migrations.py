@@ -476,12 +476,83 @@ def add_m3_booking_schema(connection: Connection) -> None:
     )
 
 
+def add_m3_simulated_payment(connection: Connection) -> None:
+    """Put confirmed bookings behind a bounded local payment simulation.
+
+    Existing M3 rows remain valid confirmed bookings. New rows first reserve the
+    slot as ``awaiting_payment`` and receive a public confirmation code only
+    after the local simulator records a successful payment event.
+    """
+    connection.execute(
+        text(
+            "ALTER TABLE bookings "
+            "ADD COLUMN IF NOT EXISTS customer_reference VARCHAR(32), "
+            "ADD COLUMN IF NOT EXISTS payment_expires_at TIMESTAMPTZ, "
+            "ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ, "
+            "ADD COLUMN IF NOT EXISTS payment_expired_at TIMESTAMPTZ, "
+            "ADD COLUMN IF NOT EXISTS payment_event_id VARCHAR(128), "
+            "ADD COLUMN IF NOT EXISTS payment_method VARCHAR(64)"
+        )
+    )
+    connection.execute(
+        text(
+            "UPDATE bookings SET "
+            "customer_reference = COALESCE(customer_reference, confirmation_code), "
+            "paid_at = COALESCE(paid_at, created_at), "
+            "payment_method = COALESCE(payment_method, 'legacy_confirmed') "
+            "WHERE customer_reference IS NULL OR paid_at IS NULL "
+            "OR payment_method IS NULL"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE bookings "
+            "ALTER COLUMN customer_reference SET NOT NULL, "
+            "ALTER COLUMN confirmation_code DROP NOT NULL, "
+            "ALTER COLUMN status SET DEFAULT 'awaiting_payment'"
+        )
+    )
+    connection.execute(text("ALTER TABLE bookings DROP CONSTRAINT IF EXISTS ck_bookings_status"))
+    connection.execute(
+        text(
+            "ALTER TABLE bookings ADD CONSTRAINT ck_bookings_status CHECK ("
+            "(status = 'awaiting_payment' AND payment_expires_at IS NOT NULL "
+            "AND confirmation_code IS NULL AND paid_at IS NULL "
+            "AND payment_expired_at IS NULL) OR "
+            "(status = 'confirmed' AND confirmation_code IS NOT NULL "
+            "AND paid_at IS NOT NULL AND payment_expired_at IS NULL) OR "
+            "(status = 'payment_expired' AND confirmation_code IS NULL "
+            "AND paid_at IS NULL AND payment_expired_at IS NOT NULL))"
+        )
+    )
+    for constraint_name, columns in (
+        ("uq_bookings_customer_reference", "customer_reference"),
+        ("uq_bookings_payment_event", "merchant_id, payment_event_id"),
+    ):
+        connection.execute(
+            text(
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+                f"WHERE conname = '{constraint_name}') THEN "
+                f"ALTER TABLE bookings ADD CONSTRAINT {constraint_name} "
+                f"UNIQUE ({columns}); END IF; END $$"
+            )
+        )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_bookings_active_payment_hold "
+            "ON bookings (merchant_id, staff_id, payment_expires_at) "
+            "WHERE status = 'awaiting_payment'"
+        )
+    )
+
+
 MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0001_m2_merchant_and_booking_drafts", create_m2_schema),
     ("0002_m2_staff_and_availability", add_m2_availability_schema),
     ("0003_m2_schedule_revision", add_m2_schedule_revision),
     ("0004_m2_review_reconciliation", add_m2_review_reconciliation),
     ("0005_m3_booking", add_m3_booking_schema),
+    ("0006_m3_simulated_payment", add_m3_simulated_payment),
 )
 
 

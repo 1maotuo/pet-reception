@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
@@ -37,7 +37,7 @@ describe('App', () => {
   })
 
   it('renders a confirmed booking only from the credential-protected backend record', async () => {
-    window.history.replaceState({}, '', '/booking/PR-ABC123#token=customer-secret')
+    window.history.replaceState({}, '', '/booking/BK-ABC123#token=customer-secret')
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -57,7 +57,12 @@ describe('App', () => {
           starts_at: '2026-12-01T17:00:00Z',
           ends_at: '2026-12-01T18:00:00Z',
           merchant_time_zone: 'America/Los_Angeles',
+          customer_reference: 'BK-ABC123',
           confirmation_code: 'PR-ABC123',
+          payment_expires_at: '2026-12-01T16:30:00Z',
+          paid_at: '2026-09-20T00:00:00Z',
+          payment_expired_at: null,
+          payment_method: 'local_simulation',
           status: 'confirmed',
         },
       }),
@@ -70,12 +75,73 @@ describe('App', () => {
     expect(screen.getByText('PR-ABC123')).toBeInTheDocument()
     expect(screen.getByText('基础洗护')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/customer/bookings/PR-ABC123',
+      '/api/customer/bookings/BK-ABC123',
       expect.objectContaining({
         headers: expect.objectContaining({ Authorization: 'Bearer customer-secret' }),
       }),
     )
     expect(document.body).not.toHaveTextContent('customer-secret')
+  })
+
+  it('shows a payment hold and only claims confirmation after simulated payment succeeds', async () => {
+    window.history.replaceState({}, '', '/booking/BK-PENDING#token=customer-secret')
+    const pendingBooking = {
+      id: 'booking-pending',
+      merchant_display_name: 'Paws & Bubbles 宠物美容（演示）',
+      staff_display_name: 'Lisa',
+      service_name_zh: '基础洗护',
+      customer_name: '王女士',
+      contact_phone: '+86-138-0000-0000',
+      pet_name: '豆包',
+      pet_species: '犬',
+      pet_breed: null,
+      pet_age_years: null,
+      pet_care_notes: null,
+      need_description: null,
+      starts_at: '2026-12-01T17:00:00Z',
+      ends_at: '2026-12-01T18:00:00Z',
+      merchant_time_zone: 'America/Los_Angeles',
+      customer_reference: 'BK-PENDING',
+      confirmation_code: null,
+      payment_expires_at: '2026-12-01T16:30:00Z',
+      paid_at: null,
+      payment_expired_at: null,
+      payment_method: null,
+      status: 'awaiting_payment',
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ booking: pendingBooking }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          booking: {
+            ...pendingBooking,
+            confirmation_code: 'PR-CONFIRMED',
+            paid_at: '2026-09-20T00:00:00Z',
+            payment_method: 'local_simulation',
+            status: 'confirmed',
+          },
+        }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<App />)
+
+    expect(await screen.findByText('等待模拟支付')).toBeInTheDocument()
+    expect(screen.queryByText('预约已确认')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '模拟支付成功' }))
+    expect(await screen.findByText('预约已确认')).toBeInTheDocument()
+    expect(screen.getByText('PR-CONFIRMED')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      '/api/customer/bookings/BK-PENDING/simulate-payment',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer customer-secret',
+          'X-Payment-Event-ID': expect.stringMatching(/^web-payment-/),
+        }),
+      }),
+    )
   })
 
   it('does not render a success result for an invalid booking credential', async () => {
@@ -86,5 +152,13 @@ describe('App', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('预约凭证无效或预约不存在')
     expect(screen.queryByText('预约已确认')).not.toBeInTheDocument()
+  })
+
+  it('shows a controlled error for a malformed encoded booking URL', () => {
+    window.history.replaceState({}, '', '/booking/%#token=unused')
+
+    render(<App />)
+
+    expect(screen.getByRole('alert')).toHaveTextContent('预约链接格式无效')
   })
 })

@@ -39,6 +39,8 @@ from .store import (
     BookingConfirmationConflictError,
     BookingCredentialError,
     BookingNeedsInputError,
+    BookingPaymentConflictError,
+    BookingPaymentExpiredError,
     BookingPreparationExpiredError,
     BookingPreparationNotFoundError,
     BookingPreparationNotPresentedError,
@@ -85,6 +87,7 @@ def create_app(
         store = PostgresStore(
             probe.get_engine(),
             booking_hold_minutes=resolved_settings.booking_hold_minutes,
+            payment_hold_minutes=resolved_settings.payment_hold_minutes,
             booking_credential_secret=resolved_settings.booking_credential_secret,
             web_origin=resolved_settings.web_origin,
         )
@@ -96,7 +99,7 @@ def create_app(
 
     application = FastAPI(
         title="Pet Reception Backend",
-        version="0.4.0",
+        version="0.5.0",
         lifespan=lifespan,
     )
     application.add_middleware(
@@ -113,6 +116,7 @@ def create_app(
             "X-Voice-Turn-ID",
             "X-Presentation-Event-ID",
             "X-Confirmation-Event-ID",
+            "X-Payment-Event-ID",
         ],
     )
 
@@ -495,21 +499,54 @@ def create_app(
             raise AssertionError("unreachable")
 
     @application.get(
-        "/api/customer/bookings/{confirmation_code}",
+        "/api/customer/bookings/{booking_reference}",
         response_model=CustomerBookingResult,
     )
     def customer_booking(
-        confirmation_code: str,
+        booking_reference: str,
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
         current_store: DataStore = Depends(require_store),
     ) -> CustomerBookingResult:
         token = credentials.credentials if credentials else ""
         try:
             return CustomerBookingResult(
-                booking=current_store.get_customer_booking(confirmation_code, token)
+                booking=current_store.get_customer_booking(booking_reference, token)
             )
         except BookingCredentialError as error:
             raise HTTPException(status_code=404, detail="booking not found") from error
+
+    @application.post(
+        "/api/customer/bookings/{booking_reference}/simulate-payment",
+        response_model=CustomerBookingResult,
+    )
+    def simulate_customer_payment(
+        booking_reference: str,
+        x_payment_event_id: str = Header(min_length=8, max_length=128),
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+        current_store: DataStore = Depends(require_store),
+    ) -> CustomerBookingResult:
+        """Local-only payment success simulator; accepts no card data."""
+        token = credentials.credentials if credentials else ""
+        try:
+            return CustomerBookingResult(
+                booking=current_store.simulate_payment(
+                    booking_reference,
+                    token,
+                    x_payment_event_id,
+                )
+            )
+        except BookingCredentialError as error:
+            raise HTTPException(status_code=404, detail="booking not found") from error
+        except BookingPaymentExpiredError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "payment_expired", "message": "支付保留已过期，请重新预约"},
+            ) from error
+        except BookingPaymentConflictError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "payment_conflict", "reason": str(error)},
+            ) from error
 
     @application.get(
         "/api/internal/merchant/bookings",

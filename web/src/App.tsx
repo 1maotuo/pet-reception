@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   fetchCustomerBooking,
   fetchSystemStatus,
+  simulateCustomerPayment,
   type BookingRecord,
   type SystemStatus,
 } from './api'
@@ -23,9 +24,14 @@ type BookingLoadState =
 function bookingCredentialFromLocation() {
   const match = window.location.pathname.match(/^\/booking\/([^/]+)\/?$/)
   if (!match) return null
-  return {
-    confirmationCode: decodeURIComponent(match[1]),
-    accessToken: new URLSearchParams(window.location.hash.slice(1)).get('token') ?? '',
+  try {
+    return {
+      kind: 'credential' as const,
+      bookingReference: decodeURIComponent(match[1]),
+      accessToken: new URLSearchParams(window.location.hash.slice(1)).get('token') ?? '',
+    }
+  } catch {
+    return { kind: 'invalid' as const }
   }
 }
 
@@ -37,8 +43,10 @@ function formatBookingTime(value: string, timeZone: string) {
   }).format(new Date(value))
 }
 
-function CustomerBookingPage({ confirmationCode, accessToken }: { confirmationCode: string; accessToken: string }) {
+function CustomerBookingPage({ bookingReference, accessToken }: { bookingReference: string; accessToken: string }) {
   const [state, setState] = useState<BookingLoadState>({ kind: 'loading' })
+  const [paymentPending, setPaymentPending] = useState(false)
+  const [paymentError, setPaymentError] = useState('')
 
   useEffect(() => {
     if (!accessToken) {
@@ -46,7 +54,7 @@ function CustomerBookingPage({ confirmationCode, accessToken }: { confirmationCo
       return
     }
     const controller = new AbortController()
-    void fetchCustomerBooking(confirmationCode, accessToken, controller.signal)
+    void fetchCustomerBooking(bookingReference, accessToken, controller.signal)
       .then((value) => setState({ kind: 'ready', value }))
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === 'AbortError') return
@@ -56,7 +64,7 @@ function CustomerBookingPage({ confirmationCode, accessToken }: { confirmationCo
         })
       })
     return () => controller.abort()
-  }, [accessToken, confirmationCode])
+  }, [accessToken, bookingReference])
 
   if (state.kind !== 'ready') {
     return (
@@ -69,16 +77,54 @@ function CustomerBookingPage({ confirmationCode, accessToken }: { confirmationCo
   }
 
   const booking = state.value
+  const pay = async () => {
+    setPaymentPending(true)
+    setPaymentError('')
+    try {
+      const updated = await simulateCustomerPayment(bookingReference, accessToken)
+      setState({ kind: 'ready', value: updated })
+    } catch (error) {
+      setPaymentError(error instanceof Error ? error.message : '模拟支付失败')
+      try {
+        const refreshed = await fetchCustomerBooking(bookingReference, accessToken)
+        setState({ kind: 'ready', value: refreshed })
+      } catch {
+        // Keep the last verified record when the follow-up read also fails.
+      }
+    } finally {
+      setPaymentPending(false)
+    }
+  }
+  const isAwaitingPayment = booking.status === 'awaiting_payment'
+  const isConfirmed = booking.status === 'confirmed'
   return (
     <main className="shell booking-shell">
-      <p className="eyebrow">预约已确认</p>
+      <p className="eyebrow">
+        {isConfirmed ? '预约已确认' : isAwaitingPayment ? '等待模拟支付' : '支付保留已过期'}
+      </p>
       <h1 className="booking-title">{booking.pet_name} 的服务安排</h1>
-      <p className="lede">此页面通过专属凭证读取后端中已提交的预约记录，不是浏览器生成的成功页面。</p>
+      <p className="lede">
+        {isConfirmed
+          ? '后端已经记录本地模拟支付成功，以下是正式确认记录。'
+          : isAwaitingPayment
+            ? '该时段正在为您临时保留。完成本地模拟支付后才会生成正式确认编号。此页面不会采集银行卡信息。'
+            : '支付保留已超时释放；请返回语音前台重新查询空档。'}
+      </p>
+
+      {isAwaitingPayment && (
+        <section className="payment-panel" aria-label="本地模拟支付">
+          <p>本地开发验证：模拟一次支付成功事件，不连接真实支付平台。</p>
+          <button type="button" disabled={paymentPending} onClick={() => void pay()}>
+            {paymentPending ? '正在处理…' : '模拟支付成功'}
+          </button>
+          {paymentError && <p className="booking-error" role="alert">{paymentError}</p>}
+        </section>
+      )}
 
       <section className="booking-card" aria-label="预约详情">
         <div className="booking-code">
-          <span>确认编号</span>
-          <strong>{booking.confirmation_code}</strong>
+          <span>{isConfirmed ? '确认编号' : '预约参考号'}</span>
+          <strong>{booking.confirmation_code ?? booking.customer_reference}</strong>
         </div>
         <dl className="booking-details">
           <div><dt>商家</dt><dd>{booking.merchant_display_name}</dd></div>
@@ -88,11 +134,12 @@ function CustomerBookingPage({ confirmationCode, accessToken }: { confirmationCo
           <div><dt>客户</dt><dd>{booking.customer_name}</dd></div>
           <div><dt>联系电话</dt><dd>{booking.contact_phone}</dd></div>
           <div><dt>宠物</dt><dd>{booking.pet_name} · {booking.pet_species}{booking.pet_breed ? ` · ${booking.pet_breed}` : ''}</dd></div>
+          {isAwaitingPayment && booking.payment_expires_at && <div><dt>保留至</dt><dd>{formatBookingTime(booking.payment_expires_at, booking.merchant_time_zone)}</dd></div>}
           {booking.need_description && <div><dt>本次需求</dt><dd>{booking.need_description}</dd></div>}
           {booking.pet_care_notes && <div><dt>照护备注</dt><dd>{booking.pet_care_notes}</dd></div>}
         </dl>
       </section>
-      <p className="credential-note">请妥善保存此链接。链接中的访问凭证不会写入页面正文，也不会由前端持久化。</p>
+      <p className="credential-note">请妥善保存此链接。链接中的访问凭证不会写入页面正文，也不会由前端持久化；模拟支付事件不包含真实支付信息。</p>
     </main>
   )
 }
@@ -101,12 +148,7 @@ function StatusDot({ ok }: { ok: boolean }) {
   return <span aria-hidden="true" className={`status-dot ${ok ? 'status-dot--ok' : 'status-dot--warn'}`} />
 }
 
-export default function App() {
-  const bookingCredential = bookingCredentialFromLocation()
-  if (bookingCredential) {
-    return <CustomerBookingPage {...bookingCredential} />
-  }
-
+function SystemStatusPage() {
   const [state, setState] = useState<LoadState>({ kind: 'loading' })
 
   const refresh = useCallback((signal?: AbortSignal) => {
@@ -189,4 +231,26 @@ export default function App() {
       </div>
     </main>
   )
+}
+
+export default function App() {
+  const bookingLocation = bookingCredentialFromLocation()
+  if (bookingLocation?.kind === 'credential') {
+    return (
+      <CustomerBookingPage
+        bookingReference={bookingLocation.bookingReference}
+        accessToken={bookingLocation.accessToken}
+      />
+    )
+  }
+  if (bookingLocation?.kind === 'invalid') {
+    return (
+      <main className="shell booking-shell">
+        <p className="eyebrow">预约结果</p>
+        <h1 className="booking-title">无法显示预约</h1>
+        <p className="booking-error" role="alert">预约链接格式无效</p>
+      </main>
+    )
+  }
+  return <SystemStatusPage />
 }

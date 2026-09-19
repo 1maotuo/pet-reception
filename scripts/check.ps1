@@ -7,20 +7,23 @@ if (-not (Test-Path -LiteralPath $python)) {
     throw 'backend/.venv is missing; follow README.md first-install steps'
 }
 
-$requiredNodeVersion = 'v24.15.0'
+$minimumNodeVersion = [version]'24.15.0'
 $portableNode = Join-Path (Split-Path -Parent $projectRoot) 'work\runtimes\node-v24.15.0-win-x64\node.exe'
 $nodeSources = @(
     (Get-Command node -All -ErrorAction SilentlyContinue | ForEach-Object Source)
     $portableNode
 ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
 $nodeSource = $nodeSources |
-    Where-Object { (& $_ --version) -eq $requiredNodeVersion } |
+    Where-Object {
+        $candidateVersion = [version]((& $_ --version).TrimStart('v').Split('-')[0])
+        $candidateVersion.Major -eq 24 -and $candidateVersion -ge $minimumNodeVersion
+    } |
     Select-Object -First 1
 if ($null -eq $nodeSource) {
     $foundVersions = $nodeSources |
         ForEach-Object { & $_ --version } |
         Sort-Object -Unique
-    throw "Node $requiredNodeVersion is required; found $($foundVersions -join ', ')"
+    throw "Node ^24.15.0 is required; found $($foundVersions -join ', ')"
 }
 $env:Path = "$(Split-Path -Parent $nodeSource);$env:Path"
 

@@ -409,9 +409,15 @@ bookings = Table(
     Column("summary", JSONB, nullable=False),
     Column("summary_digest", String(64), nullable=False),
     Column("confirmation_event_id", String(128), nullable=False),
-    Column("confirmation_code", String(32), nullable=False, unique=True),
+    Column("customer_reference", String(32), nullable=False, unique=True),
+    Column("confirmation_code", String(32), unique=True),
     Column("customer_access_token_hash", String(64), nullable=False),
-    Column("status", String(32), nullable=False, server_default="confirmed"),
+    Column("payment_expires_at", DateTime(timezone=True)),
+    Column("paid_at", DateTime(timezone=True)),
+    Column("payment_expired_at", DateTime(timezone=True)),
+    Column("payment_event_id", String(128)),
+    Column("payment_method", String(64)),
+    Column("status", String(32), nullable=False, server_default="awaiting_payment"),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     ForeignKeyConstraint(
         ["preparation_id"],
@@ -443,5 +449,19 @@ bookings = Table(
         ondelete="RESTRICT",
         name="fk_bookings_service",
     ),
-    CheckConstraint("status = 'confirmed'", name="ck_bookings_status"),
+    UniqueConstraint(
+        "merchant_id",
+        "payment_event_id",
+        name="uq_bookings_payment_event",
+    ),
+    CheckConstraint(
+        "(status = 'awaiting_payment' AND payment_expires_at IS NOT NULL "
+        "AND confirmation_code IS NULL AND paid_at IS NULL "
+        "AND payment_expired_at IS NULL) OR "
+        "(status = 'confirmed' AND confirmation_code IS NOT NULL "
+        "AND paid_at IS NOT NULL AND payment_expired_at IS NULL) OR "
+        "(status = 'payment_expired' AND confirmation_code IS NULL "
+        "AND paid_at IS NULL AND payment_expired_at IS NOT NULL)",
+        name="ck_bookings_status",
+    ),
 )

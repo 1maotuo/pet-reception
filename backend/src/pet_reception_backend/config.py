@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     merchant_admin_token: str = ""
     booking_credential_secret: str = ""
     booking_hold_minutes: int = Field(default=5, ge=1, le=30)
+    payment_hold_minutes: int = Field(default=10, ge=1, le=60)
     demo_merchant_id: str = "demo-grooming-001"
     merchant_config_path: str = "config/demo-merchant.json"
 
