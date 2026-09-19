@@ -1,0 +1,145 @@
+# Pet Reception
+
+面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库完成到 M0/M1：可运行工程、真实状态页、Qwen Audio Agent 薄接入和一个只读演示商家 HTTP 工具。正式预约、空档查询和写入尚未实现。
+
+## 当前组件
+
+- `web/`：React 19 + TypeScript 7 + Vite 8 状态页。
+- `backend/`：FastAPI 后端，提供健康检查、PostgreSQL 连接检查和受保护的演示商家资料接口。
+- `voice-gateway/`：固定 `qwen-audio-agent@1.11.0`，复用其 WebUI、实时音频、播放、打断和重连机制；注入确定性的商家 HTTP 协调器，并通过版本守卫补丁配置同一套服务端 VAD 与首次商家问候。
+- `config/demo-merchant.json`：当前演示商家、前台角色、场景安全分流和能力开关的受信配置；后端和语音网关读取同一份商家来源。
+- `compose.yaml`：绑定本机回环地址的 PostgreSQL 17.11 开发服务。
+
+## 运行条件
+
+- Node.js `24.15.0`。Qwen Audio Agent 1.11.0 要求 `^22.22.2 || ^24.15.0 || >=26.0.0`；项目按已验证的 24.15.0 固定。
+- Python `3.12.x`。
+- Docker Desktop，用于开发 PostgreSQL。
+- 真实语音需要百炼 `DASHSCOPE_API_KEY`、浏览器麦克风权限和可用音频设备。
+
+不要将 API Key 粘贴到聊天、前端代码或 Git。真实密钥只放在被忽略的根目录 `.env`。
+
+## 首次安装（PowerShell）
+
+在仓库根目录执行：
+
+```powershell
+.\scripts\init-env.ps1
+```
+
+脚本只在 `.env` 不存在时创建文件，并为网关内部密钥生成随机值。随后在 `.env` 中本地填写：
+
+```dotenv
+DASHSCOPE_API_KEY=你的百炼APIKey
+```
+
+安装依赖：
+
+```powershell
+node --version  # 必须是 v24.15.0
+npm ci
+
+python -m venv backend\.venv
+backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.lock
+backend\.venv\Scripts\python.exe -m pip install -e backend --no-deps
+```
+
+`npm ci` 会运行 `scripts/apply-qwen-m1-patch.mjs`。该脚本只接受锁定的 Qwen Audio Agent 1.11.0；版本不匹配会停止安装，避免对未知上游静默打补丁。
+
+## 启动
+
+先启动数据库：
+
+```powershell
+docker compose up -d db
+docker compose ps
+```
+
+分别打开三个终端，在仓库根目录运行：
+
+```powershell
+# 终端 1：FastAPI
+backend\.venv\Scripts\python.exe -m uvicorn pet_reception_backend.app:app --host 127.0.0.1 --port 8010
+
+# 终端 2：React 状态页
+npm run dev:web
+
+# 终端 3：Qwen Audio Agent + 商家 HTTP 工具
+npm run dev:voice
+```
+
+打开：
+
+- 状态页：<http://127.0.0.1:5173>
+- FastAPI 文档：<http://127.0.0.1:8010/docs>
+- Qwen 原版 WebUI：<http://127.0.0.1:3101>
+
+前端会实时显示后端和数据库状态。数据库不可用时页面显示“当前不可用”，`GET /readyz` 返回 503，不会静默降级。
+
+## 验证
+
+默认确定性检查：
+
+```powershell
+.\scripts\check.ps1
+```
+
+数据库运行后增加真实 PostgreSQL 检查：
+
+```powershell
+$env:RUN_POSTGRES_TESTS = '1'
+$env:DATABASE_URL = 'postgresql+psycopg://pet_reception:pet_reception_dev@127.0.0.1:5432/pet_reception'
+Push-Location backend
+.\.venv\Scripts\python.exe -m pytest -m postgres
+Pop-Location
+Remove-Item Env:RUN_POSTGRES_TESTS
+Remove-Item Env:DATABASE_URL
+```
+
+检查 HTTP 状态：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8010/health
+Invoke-RestMethod http://127.0.0.1:3101/api/health
+```
+
+真实商家工具探针要求 FastAPI 正在运行，并使用 `.env` 中的服务令牌：
+
+```powershell
+npm run probe:tool --workspace @pet-reception/voice-gateway
+```
+
+## M1 真人语音检查
+
+1. 确认 `.env` 已配置真实 `DASHSCOPE_API_KEY`，启动后 `/api/health` 的 `voiceConfigured` 为 `true`。
+2. 打开 Qwen WebUI。无需先说话，应主动听到“Paws & Bubbles 宠物美容预约前台”的本店问候；允许麦克风后连续进行至少三轮中文对话。
+3. 问“你是谁、能帮我做什么”。应只描述当前店的服务咨询和预约准备，不能说能操作电脑、查新闻或充当通用助手。
+4. 说“我最近身体不舒服”和“我家狗狗不舒服，还能洗澡吗”。应分别给出合适的安全建议，然后带回当前美容店范围；不能承诺查找人类医院或做诊断。
+5. 询问“这家店有哪些服务？基础洗护多少钱？我想约明天下午”。模型应真实调用商家资料工具，保留“演示价格、起、实际需确认”，并明确当前不能查空档或创建预约。
+6. 描述宠物情况并问“你推荐做什么美容”。模型必须先查询商家资料；当前目录只有服务名称和价格，没有适用性与操作步骤，因此只能列出现有选项并说明需由商家确认，不能自行承诺某项能解决问题。
+7. 慢慢说一个带口音或口语省略的请求，并在句中分别停顿约半秒、一秒和约一秒半。当前唯一轮次检测为 `server_vad`，噪声环境起始配置为声学阈值 0.65、结束等待 1800 ms；预期背景声不轻易触发，短暂停顿不抢答，实际听感记录为真人证据。
+8. 在助手播报时插话，确认播放及时停止，随后继续提问仍可回答；问候被打断时不应强行重播。
+9. 结束并新建会话，确认新连接会重新问候，旧会话工具结果不串入新会话。
+
+当前工具只有只读商家资料。任何预约、空档或确认请求都必须如实说明尚未实现；不得生成预约编号。
+
+停顿参数位于根目录被忽略的 `.env`：
+
+```dotenv
+VOICE_TURN_DETECTION_TYPE=server_vad
+VOICE_SILENCE_DURATION_MS=1800
+VOICE_VAD_THRESHOLD=0.65
+VOICE_AUDIO_INPUT_LABEL=USB Audio Device
+```
+
+静音时间有效范围为 200–6000 ms，声学阈值有效范围为 -1 到 1；阈值越高越不容易被背景噪声触发，但也要求说话更清楚。调整后需重启语音网关；这些都是千问原生服务端 VAD 参数，不是浏览器侧的第二套断句逻辑。
+
+`VOICE_AUDIO_INPUT_LABEL` 用于匹配物理录音设备名称。本机已配置为耳机对应的 `USB Audio Device`；页面取得权限后会把匹配设备的真实 `deviceId` 传给上游原有 `getUserMedia()`。配置不为空但设备不存在时，页面明确报错，不会静默回退到电脑内置麦克风。该薄适配不替换上游录音、播放、VAD 或重连实现。
+
+当前 0.65/1800 ms 只是面向普通室内噪声的首轮实验值，不代表所有麦克风和口音都已验收。背景声仍频繁触发时可小步提高阈值；正常说话漏收时应降低阈值；句中停顿仍被拆开时延长静音时间；说完等待过久时缩短静音时间。每次只改一个参数并重启网关，保留真人对照结果。
+
+## 身份与密钥边界
+
+Qwen Gateway 使用签名的 HttpOnly 身份 Cookie。模型只能提交通用工具目标，不能提交授权用的 `merchant_id`、`owner_id`、`session_id` 或 `turn_id`。薄协调器从 Gateway 的服务端上下文读取这些值，以服务令牌调用 FastAPI；FastAPI 同时验证令牌和固定商家绑定。
+
+上游版本与扩展边界见 `docs/upstream/QWEN_AUDIO_AGENT.md`，本轮命令与结果见 `docs/evidence/M0_M1_2026-09-19.md`。

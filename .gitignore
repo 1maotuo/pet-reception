@@ -1,0 +1,63 @@
+# Environment files and local secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+.playwright-cli/
+.npm-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime logs and local captures
+logs/
+*.log
+*.pid
+recordings/
+audio-captures/
+voice-gateway/runtime/
+
+# Local database state and dumps
+postgres-data/
+pgdata/
+data/postgres/
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.swp
+*~

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pet-reception-backend"
+version = "0.1.0"
+description = "M0/M1 backend for the pet reception voice frontend"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi==0.141.1",
+  "pydantic-settings==2.15.0",
+  "psycopg[binary]==3.3.6",
+  "sqlalchemy==2.0.54",
+  "uvicorn[standard]==0.53.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx==0.28.1",
+  "pytest==9.1.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+markers = [
+  "postgres: requires the explicitly configured PostgreSQL development database",
+]

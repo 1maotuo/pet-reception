@@ -1,0 +1,19 @@
+{
+  "name": "@pet-reception/voice-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/index.mjs",
+    "start": "node src/index.mjs",
+    "test": "node --test",
+    "probe:tool": "node scripts/probe-tool.mjs"
+  },
+  "dependencies": {
+    "dotenv": "17.4.2",
+    "qwen-audio-agent": "1.11.0"
+  },
+  "engines": {
+    "node": "24.15.0"
+  }
+}

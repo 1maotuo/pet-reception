@@ -1,0 +1,1 @@
+"""Pet reception backend package."""

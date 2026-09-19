@@ -1,0 +1,21 @@
+name: pet-reception
+
+services:
+  db:
+    image: postgres:17.11-alpine@sha256:f02121de6f74d30d8a94cd1d9584125e2178d7e6c377d8130112d4e52d867995
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pet_reception}
+      POSTGRES_USER: ${POSTGRES_USER:-pet_reception}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pet_reception_dev}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pet_reception_pgdata:/var/lib/postgresql/data
+
+volumes:
+  pet_reception_pgdata:

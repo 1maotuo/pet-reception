@@ -1,0 +1,22 @@
+{
+  "name": "pet-reception",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "npm@11.12.1",
+  "engines": {
+    "node": "24.15.0"
+  },
+  "workspaces": [
+    "web",
+    "voice-gateway"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/apply-qwen-m1-patch.mjs",
+    "dev:web": "npm run dev --workspace @pet-reception/web",
+    "dev:voice": "npm run dev --workspace @pet-reception/voice-gateway",
+    "build:web": "npm run build --workspace @pet-reception/web",
+    "test:web": "npm run test --workspace @pet-reception/web",
+    "test:voice": "npm run test --workspace @pet-reception/voice-gateway",
+    "test": "npm run test:web && npm run test:voice"
+  }
+}
