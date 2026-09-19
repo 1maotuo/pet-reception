@@ -89,6 +89,56 @@ test('applies guarded M4 tool and playback presentation hooks', () => {
   assert.match(gateway, /context\.responseDone/)
   assert.match(gateway, /context\.transcriptDone/)
   assert.match(responseContext, /'bookingPresentation'/)
+  assert.match(responseContext, /export function bookingPresentationReady/)
+  assert.match(gateway, /reportBookingPresentationIfComplete\(id, context\)/)
+  assert.match(gateway, /reportBookingPresentationIfComplete\(id, responseContext\)/)
+})
+
+test('booking presentation converges once for every completion order and never after cancellation', async () => {
+  const { bookingPresentationReady } = await import(pathToFileURL(resolve(
+    qwenRoot,
+    'server',
+    'src',
+    'voice',
+    'response-context.mjs',
+  )))
+  const eventOrders = [
+    ['playbackEnded', 'responseDone', 'transcriptDone'],
+    ['responseDone', 'transcriptDone', 'playbackEnded'],
+    ['transcriptDone', 'playbackEnded', 'responseDone'],
+  ]
+
+  for (const order of eventOrders) {
+    const context = {
+      bookingPresentation: { preparationId: 'prep', eventId: 'event' },
+      playbackStarted: true,
+      playbackEnded: false,
+      responseDone: false,
+      transcriptDone: false,
+      presentationReported: false,
+      suppressed: false,
+    }
+    let reports = 0
+    for (const field of order) {
+      context[field] = true
+      if (bookingPresentationReady(context)) {
+        context.presentationReported = true
+        reports += 1
+      }
+    }
+    assert.equal(reports, 1)
+  }
+
+  const cancelled = {
+    bookingPresentation: { preparationId: 'prep', eventId: 'event' },
+    playbackStarted: true,
+    playbackEnded: true,
+    responseDone: true,
+    transcriptDone: true,
+    presentationReported: false,
+    suppressed: true,
+  }
+  assert.equal(bookingPresentationReady(cancelled), false)
 })
 
 test('builds the Qwen session with the noisy-room server VAD profile', async () => {

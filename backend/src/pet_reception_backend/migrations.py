@@ -546,6 +546,27 @@ def add_m3_simulated_payment(connection: Connection) -> None:
     )
 
 
+def add_m4_grooming_catalog(connection: Connection) -> None:
+    """Persist bounded grooming facts used for service explanation/recommendation."""
+    connection.execute(
+        text(
+            "ALTER TABLE merchants "
+            "ADD COLUMN IF NOT EXISTS grooming_policy JSONB"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE merchant_services "
+            "ADD COLUMN IF NOT EXISTS supported_species JSONB NOT NULL DEFAULT '[]'::jsonb, "
+            "ADD COLUMN IF NOT EXISTS included_items JSONB NOT NULL DEFAULT '[]'::jsonb, "
+            "ADD COLUMN IF NOT EXISTS recommended_for JSONB NOT NULL DEFAULT '[]'::jsonb, "
+            "ADD COLUMN IF NOT EXISTS assessment_required_for JSONB NOT NULL DEFAULT '[]'::jsonb, "
+            "ADD COLUMN IF NOT EXISTS not_included JSONB NOT NULL DEFAULT '[]'::jsonb, "
+            "ADD COLUMN IF NOT EXISTS source VARCHAR(200)"
+        )
+    )
+
+
 MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0001_m2_merchant_and_booking_drafts", create_m2_schema),
     ("0002_m2_staff_and_availability", add_m2_availability_schema),
@@ -553,6 +574,7 @@ MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0004_m2_review_reconciliation", add_m2_review_reconciliation),
     ("0005_m3_booking", add_m3_booking_schema),
     ("0006_m3_simulated_payment", add_m3_simulated_payment),
+    ("0007_m4_grooming_catalog", add_m4_grooming_catalog),
 )
 
 

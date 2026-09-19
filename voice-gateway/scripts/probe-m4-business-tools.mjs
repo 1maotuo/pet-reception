@@ -38,6 +38,17 @@ const coordinator = new MerchantCoordinator({ toolClient: client })
 
 const merchant = await coordinator.runBusinessTool('get_merchant_info', {}, context('merchant'))
 assert.equal(merchant.output.merchant.id, process.env.DEMO_MERCHANT_ID)
+assert.match(merchant.output.merchant.local_date, /^\d{4}-\d{2}-\d{2}$/)
+assert.equal(merchant.output.merchant.time_zone, 'America/Los_Angeles')
+assert.deepEqual(merchant.output.merchant.grooming_policy.supported_species, ['犬'])
+assert.ok(merchant.output.merchant.grooming_policy.unsupported_species.includes('猫'))
+const fullGroom = merchant.output.merchant.services.find(
+  (service) => service.id === 'demo-full-groom',
+)
+assert.ok(fullGroom, 'trusted catalog must contain full groom service')
+assert.ok(fullGroom.included_items.includes('按犬种和毛发状况进行修剪造型'))
+assert.ok(fullGroom.assessment_required_for.includes('任何毛发打结'))
+assert.ok(fullGroom.not_included.includes('医疗诊断或治疗'))
 
 let updated = await coordinator.runBusinessTool('update_booking_draft', {
   customer_name: 'M4 HTTP 探针客户',
@@ -53,12 +64,14 @@ let updated = await coordinator.runBusinessTool('update_booking_draft', {
   preferred_time_of_day: 'morning',
   staff_preference_text: 'Lisa',
   staff_id: 'demo-staff-lisa',
+  search_availability_after_update: true,
 }, context('draft-12'))
 assert.deepEqual(updated.output.missing_for_availability, [])
+assert.ok(updated.output.availability, 'same-turn update must be able to search availability')
 
-let searched
+let searched = { output: { search: updated.output.availability } }
 let selectedWeek = 12
-for (; selectedWeek <= 52; selectedWeek += 1) {
+for (; selectedWeek <= 52 && searched.output.search.status !== 'available'; selectedWeek += 1) {
   if (selectedWeek !== 12) {
     updated = await coordinator.runBusinessTool('update_booking_draft', {
       preferred_date: futureTuesday(selectedWeek),
@@ -123,6 +136,9 @@ assert.equal(status.output.booking.id, confirmed.output.booking.id)
 console.log(JSON.stringify({
   result: 'passed',
   merchant: merchant.output.merchant.display_name,
+  merchant_local_date: merchant.output.merchant.local_date,
+  grooming_catalog_persisted: true,
+  same_turn_update_and_search: true,
   candidate: {
     selected_week_offset: selectedWeek,
     starts_at: candidate.starts_at,

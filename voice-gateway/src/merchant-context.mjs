@@ -50,6 +50,7 @@ export function loadMerchantContext(
     merchantId: requiredText(source, 'id'),
     displayName: requiredText(source, 'display_name'),
     merchantType,
+    timeZone: requiredText(source, 'time_zone'),
     source: requiredText(source, 'source'),
     roleLabel: requiredText(frontDesk, 'role_label'),
     conversationFocus: requiredText(frontDesk, 'conversation_focus'),
@@ -61,11 +62,25 @@ export function loadMerchantContext(
   })
 }
 
-export function trustedPromptContext(merchant) {
+function localDateInTimeZone(timeZone, now = new Date()) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(now).map((part) => [part.type, part.value]),
+  )
+  return `${parts.year}-${parts.month}-${parts.day}`
+}
+
+export function trustedPromptContext(merchant, now = new Date()) {
   return {
     merchant_id: merchant.merchantId,
     display_name: merchant.displayName,
     merchant_type: merchant.merchantType,
+    merchant_time_zone: merchant.timeZone,
+    merchant_local_date_at_gateway_start: localDateInTimeZone(merchant.timeZone, now),
     role_label: merchant.roleLabel,
     conversation_focus: merchant.conversationFocus,
     off_topic_redirect: merchant.offTopicRedirect,

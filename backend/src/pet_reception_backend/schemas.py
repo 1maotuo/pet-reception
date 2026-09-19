@@ -23,6 +23,20 @@ class MerchantService(BaseModel):
     name_zh: str
     duration_minutes: int = Field(gt=0, le=1440)
     price_note: str
+    supported_species: list[str] = Field(default_factory=list)
+    included_items: list[str] = Field(default_factory=list)
+    recommended_for: list[str] = Field(default_factory=list)
+    assessment_required_for: list[str] = Field(default_factory=list)
+    not_included: list[str] = Field(default_factory=list)
+    source: str | None = None
+
+
+class GroomingPolicy(BaseModel):
+    supported_species: list[str] = Field(min_length=1)
+    unsupported_species: list[str] = Field(default_factory=list)
+    staff_assessment_required_for: list[str] = Field(default_factory=list)
+    recommendation_boundary: str
+    medical_boundary: str
 
 
 class MerchantStaff(BaseModel):
@@ -41,6 +55,7 @@ class DemoMerchant(BaseModel):
     address: str
     services: list[MerchantService]
     staff: list[MerchantStaff] = Field(default_factory=list)
+    grooming_policy: GroomingPolicy | None = None
     is_demo: Literal[True] = True
     source: str
 
@@ -128,6 +143,8 @@ class VoiceRequestContext(BaseModel):
 
 class MerchantToolResult(BaseModel):
     merchant: DemoMerchant
+    merchant_local_date: date
+    merchant_local_datetime: datetime
     context: VoiceRequestContext
 
 
@@ -209,6 +226,48 @@ class BookingDraftPatch(BaseModel):
         if not normalized:
             raise ValueError("empty text is not a clear operation; use clear_fields")
         return normalized
+
+    @field_validator("contact_phone")
+    @classmethod
+    def require_real_contact_phone(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        compact = value.casefold().replace(" ", "").replace("-", "")
+        forbidden = {
+            "incoming_phone",
+            "incomingphone",
+            "当前电话",
+            "来电号码",
+            "本机号码",
+            "现在这个",
+            "unknown",
+            "未知",
+        }
+        digits = "".join(character for character in value if character.isdigit())
+        if compact in forbidden or not 7 <= len(digits) <= 15:
+            raise ValueError(
+                "contact_phone must contain an actual user-provided phone number"
+            )
+        return value
+
+    @field_validator("pet_name")
+    @classmethod
+    def reject_placeholder_pet_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if value.casefold() in {
+            "未知",
+            "不详",
+            "不知道",
+            "未提供",
+            "未命名",
+            "暂无",
+            "unknown",
+            "unnamed",
+            "n/a",
+        }:
+            raise ValueError("pet_name must be the pet name explicitly provided by the user")
+        return value
 
     @model_validator(mode="after")
     def require_explicit_changes(self) -> "BookingDraftPatch":

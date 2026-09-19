@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
+from datetime import datetime
 from hmac import compare_digest
 from typing import Protocol
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -237,8 +239,11 @@ def create_app(
         merchant = current_store.get_merchant(context.merchant_id)
         if merchant is None:
             raise HTTPException(status_code=404, detail="merchant not found")
+        merchant_now = datetime.now(ZoneInfo(merchant.time_zone))
         return MerchantToolResult(
             merchant=merchant,
+            merchant_local_date=merchant_now.date(),
+            merchant_local_datetime=merchant_now,
             context=context,
         )
 
@@ -344,7 +349,11 @@ def create_app(
         except AvailabilityPastDateError as error:
             raise HTTPException(
                 status_code=422,
-                detail={"code": "past_date", "preferred_date": str(error)},
+                detail={
+                    "code": "past_date",
+                    "preferred_date": error.preferred_date.isoformat(),
+                    "merchant_today": error.merchant_today.isoformat(),
+                },
             ) from error
         except (UnknownServiceError, UnknownStaffError) as error:
             raise HTTPException(

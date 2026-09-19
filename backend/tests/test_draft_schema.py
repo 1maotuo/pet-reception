@@ -10,6 +10,10 @@ from pet_reception_backend.schemas import AvailabilitySearchRequest, BookingDraf
         {"expected_version": 0},
         {"expected_version": 0, "pet_name": None},
         {"expected_version": 0, "pet_name": "   "},
+        {"expected_version": 0, "pet_name": "未知"},
+        {"expected_version": 0, "contact_phone": "incoming_phone"},
+        {"expected_version": 0, "contact_phone": "当前电话"},
+        {"expected_version": 0, "contact_phone": "123"},
         {
             "expected_version": 0,
             "pet_name": "皮皮",
@@ -37,6 +41,14 @@ def test_draft_patch_preserves_omitted_fields_and_normalizes_text() -> None:
     )
 
     assert patch.changes() == {"pet_name": "皮皮", "pet_breed": None}
+
+
+def test_draft_patch_accepts_a_real_explicit_phone_number() -> None:
+    patch = BookingDraftPatch.model_validate(
+        {"expected_version": 0, "contact_phone": "+1 (415) 555-0188"}
+    )
+
+    assert patch.changes() == {"contact_phone": "+1 (415) 555-0188"}
 
 
 @pytest.mark.parametrize(

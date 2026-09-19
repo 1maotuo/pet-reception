@@ -636,6 +636,7 @@ def test_past_date_is_rejected_in_the_merchant_time_zone(environment) -> None:
     assert response.json()["detail"] == {
         "code": "past_date",
         "preferred_date": yesterday.isoformat(),
+        "merchant_today": datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat(),
     }
 
 

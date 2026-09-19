@@ -10,15 +10,34 @@
       "id": "demo-bath",
       "name_zh": "基础洗护",
       "duration_minutes": 60,
-      "price_note": "演示价格：$55 起，实际价格需按犬型确认"
+      "price_note": "演示价格：$55 起，实际价格需按犬型、体型和毛发状况确认",
+      "supported_species": ["犬"],
+      "included_items": ["洗澡", "吹干", "基础梳理", "耳部外观清洁", "指甲修剪"],
+      "recommended_for": ["日常清洁且不需要剪毛造型", "毛发没有明显打结"],
+      "assessment_required_for": ["任何毛发打结", "皮肤异常、伤口或明显不适", "强烈应激或攻击风险"],
+      "not_included": ["剪毛造型", "医疗诊断或治疗", "未经店员评估的严重打结处理"],
+      "source": "m4-demo-grooming-catalog:demo-bath"
     },
     {
       "id": "demo-full-groom",
       "name_zh": "全套美容",
       "duration_minutes": 120,
-      "price_note": "演示价格：$95 起，实际价格需按毛发状况确认"
+      "price_note": "演示价格：$95 起，实际价格需按犬型、体型、毛发状况和造型要求确认",
+      "supported_species": ["犬"],
+      "included_items": ["基础洗护包含项目", "全身梳理", "按犬种和毛发状况进行修剪造型"],
+      "recommended_for": ["需要剪毛或造型", "存在轻微打结且店员评估可以安全处理"],
+      "assessment_required_for": ["任何毛发打结", "皮肤异常、伤口或明显不适", "强烈应激或攻击风险", "特殊造型要求"],
+      "not_included": ["医疗诊断或治疗", "未经店员评估的严重打结处理"],
+      "source": "m4-demo-grooming-catalog:demo-full-groom"
     }
   ],
+  "grooming_policy": {
+    "supported_species": ["犬"],
+    "unsupported_species": ["猫", "爬行动物", "鸟类", "其他非犬宠物"],
+    "staff_assessment_required_for": ["任何毛发打结", "皮肤异常、伤口或明显不适", "强烈应激或攻击风险", "无法从电话确认的特殊护理需求"],
+    "recommendation_boundary": "只能根据本目录的 included_items、recommended_for、assessment_required_for 和 not_included 提供演示建议；资料没有写明时必须说明未知并请店员确认。",
+    "medical_boundary": "本店只提供非医疗美容洗护；宠物不适、伤口或疑似疾病应先联系合格兽医，紧急情况联系当地宠物急诊。"
+  },
   "source": "m1-static-demo-catalog:demo-grooming-001",
   "scheduling": {
     "slot_interval_minutes": 30,

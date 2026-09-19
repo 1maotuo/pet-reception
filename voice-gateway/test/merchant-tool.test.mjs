@@ -31,8 +31,16 @@ test('merchant tool sends server-bound merchant and gateway session context', as
           name_zh: '基础洗护',
           duration_minutes: 60,
           price_note: '$55 起',
+          supported_species: ['犬'],
+          included_items: ['洗澡', '吹干'],
+          recommended_for: ['日常清洁'],
+          assessment_required_for: ['毛发打结'],
+          not_included: ['医疗诊断'],
+          source: 'test:demo-bath',
         }],
       },
+      merchant_local_date: '2026-09-19',
+      merchant_local_datetime: '2026-09-19T10:00:00-07:00',
       context: {
         merchant_id: 'demo-grooming-001',
         owner_id: request.headers['x-voice-owner-id'],
@@ -67,6 +75,9 @@ test('merchant tool sends server-bound merchant and gateway session context', as
     assert.equal(facts.merchant.address, '123 Demo Street')
     assert.equal(facts.merchant.services[0].duration_minutes, 60)
     assert.equal(facts.merchant.services[0].price_note, '$55 起')
+    assert.deepEqual(facts.merchant.services[0].supported_species, ['犬'])
+    assert.equal(facts.merchant.local_date, '2026-09-19')
+    assert.match(facts.relative_date_rule, /merchant\.local_date/)
     assert.equal(facts.availability_checked, false)
     assert.equal(facts.booking_created, false)
     assert.match(result.metadata.presentation.inline.content, /资料边界/)
@@ -193,6 +204,29 @@ test('a slow merchant HTTP request stops at the configured timeout', async () =>
         turnId: 'turn-a',
       }),
       { name: 'TimeoutError' },
+    )
+  } finally {
+    await backend.close()
+  }
+})
+
+test('a timed-out write is reported as result_unknown instead of definite failure', async () => {
+  const backend = await listen(() => {})
+
+  try {
+    const client = new MerchantToolClient({
+      backendBaseUrl: backend.origin,
+      merchantId: 'demo-grooming-001',
+      serviceToken: 'test-service-token',
+      requestTimeoutMs: 25,
+    })
+    await assert.rejects(
+      client.updateBookingDraft({
+        ownerId: 'user_signed-owner',
+        sessionId: 'session-a',
+        turnId: 'turn-a',
+      }, { expected_version: 0, pet_name: '豆包' }),
+      { name: 'BusinessToolResultUnknownError', code: 'result_unknown' },
     )
   } finally {
     await backend.close()

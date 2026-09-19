@@ -6,6 +6,17 @@ const DRAFT_FIELDS = new Set([
   'pet_age_years', 'pet_care_notes', 'need_description', 'service_id',
   'preferred_date', 'preferred_time_of_day', 'staff_preference_text', 'staff_id',
 ])
+const STATEFUL_TOOL_NAMES = new Set([
+  'update_booking_draft',
+  'search_availability',
+  'prepare_booking',
+  'confirm_booking',
+])
+const COMPLETED_DEDUPE_TOOL_NAMES = new Set([
+  'update_booking_draft',
+  'prepare_booking',
+  'confirm_booking',
+])
 
 export const BUSINESS_TOOL_NAMES = Object.freeze([
   'get_merchant_info',
@@ -54,6 +65,40 @@ function trustedContext(options = {}) {
     turnId: requireTrustedId('turnId', options.turnId),
     signal: options.signal,
   }
+}
+
+function coordinatorContext(options = {}) {
+  return {
+    ...trustedContext(options),
+    invocationId: String(options.invocationId || '').trim(),
+    turnGeneration: Number.isInteger(options.turnGeneration)
+      ? options.turnGeneration
+      : null,
+    isActive: typeof options.isActive === 'function' ? options.isActive : () => true,
+  }
+}
+
+export class StaleBusinessTurnError extends Error {
+  constructor() {
+    super('business tool turn is no longer active')
+    this.name = 'StaleBusinessTurnError'
+    this.code = 'stale_business_turn'
+  }
+}
+
+export class BusinessToolResultUnknownError extends Error {
+  constructor(operation, cause) {
+    super(`${operation} result is unknown after the request connection ended`)
+    this.name = 'BusinessToolResultUnknownError'
+    this.operation = operation
+    this.code = 'result_unknown'
+    this.status = 0
+    this.cause = cause
+  }
+}
+
+function requireActiveTurn(context) {
+  if (!context.isActive()) throw new StaleBusinessTurnError()
 }
 
 export class BusinessToolHttpError extends Error {
@@ -133,12 +178,20 @@ export class MerchantToolClient {
   }
 
   async request(path, { method = 'GET', body, context, headers = {}, operation }) {
-    const response = await this.fetch(`${this.backendBaseUrl}${path}`, {
-      method,
-      headers: this.headers(context, headers),
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: requestSignal(context.signal, this.requestTimeoutMs),
-    })
+    let response
+    try {
+      response = await this.fetch(`${this.backendBaseUrl}${path}`, {
+        method,
+        headers: this.headers(context, headers),
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: requestSignal(context.signal, this.requestTimeoutMs),
+      })
+    } catch (error) {
+      if (method !== 'GET' && ['AbortError', 'TimeoutError'].includes(error?.name)) {
+        throw new BusinessToolResultUnknownError(operation, error)
+      }
+      throw error
+    }
     let payload
     try {
       payload = await response.json()
@@ -234,15 +287,26 @@ function merchantFacts(result) {
       time_zone: merchant.time_zone,
       is_demo: merchant.is_demo,
       source: merchant.source,
+      local_date: result.merchant_local_date,
+      local_datetime: result.merchant_local_datetime,
+      grooming_policy: merchant.grooming_policy || null,
       staff: merchant.staff || [],
       services: merchant.services.map((service) => ({
         id: service.id,
         name_zh: service.name_zh,
         duration_minutes: service.duration_minutes,
         price_note: service.price_note,
+        supported_species: service.supported_species || [],
+        included_items: service.included_items || [],
+        recommended_for: service.recommended_for || [],
+        assessment_required_for: service.assessment_required_for || [],
+        not_included: service.not_included || [],
+        source: service.source || merchant.source,
       })),
     },
-    data_boundary: '资料来自受信演示目录；价格是演示参考，不是正式报价。',
+    relative_date_rule: '今天、明天、后天和下周几必须以 merchant.local_date 与 merchant.time_zone 为准。',
+    recommendation_rule: '只能根据受信目录的适用宠物、包含项目、推荐条件、需评估条件和不包含项目回答；缺失内容必须说未知。',
+    data_boundary: '资料来自受信演示目录；价格是演示参考，不是正式报价，需评估项目不是已承诺可做。',
     availability_checked: false,
     booking_created: false,
   }
@@ -264,6 +328,7 @@ function merchantInline(result) {
   return [
     `## ${merchant.display_name}`, '', `- 地址：${merchant.address}`,
     `- 电话：${merchant.phone}`, `- 时区：${merchant.time_zone}`,
+    `- 商家当地日期：${result.merchant_local_date}`,
     `- 数据来源：${merchant.source}`, '- 资料边界：演示资料和参考价格，不是正式报价',
     '', serviceLines,
   ].join('\n')
@@ -305,6 +370,11 @@ function publicOperation(result) {
 function customerPagePresentation(result) {
   const credential = result.customer_credential
   if (!credential?.credential_url) return null
+  const statusLine = result.status === 'confirmed'
+    ? `预约已正式确认${result.booking?.confirmation_code ? `；确认码：${result.booking.confirmation_code}` : ''}。`
+    : result.status === 'payment_expired'
+      ? '付款占位已过期；没有形成正式预约，请重新查询可用时间。'
+      : '当前为等待本地模拟支付；完成前不是正式确认。'
   return {
     title: '客户预约页面',
     format: 'markdown',
@@ -313,7 +383,7 @@ function customerPagePresentation(result) {
       '',
       `[打开客户预约页面](${credential.credential_url})`,
       '',
-      '当前为等待本地模拟支付；完成前不是正式确认。请勿转发此专属链接。',
+      `${statusLine}请勿转发此专属链接。`,
     ].join('\n'),
   }
 }
@@ -354,8 +424,51 @@ function summarySpeech(summary) {
   ].filter(Boolean).join('')
 }
 
+const SPOKEN_DIGITS = Object.freeze({
+  零: '0', 〇: '0', 一: '1', 二: '2', 两: '2', 三: '3', 四: '4',
+  五: '5', 六: '6', 七: '7', 八: '8', 九: '9',
+})
+
+function replaceSpokenDigits(value) {
+  return String(value || '').replace(/[零〇一二两三四五六七八九]/g, (digit) => SPOKEN_DIGITS[digit])
+}
+
 function normalizedTranscript(value) {
-  return String(value || '').toLocaleLowerCase().replace(/[\s，。！？、：；,.!?;:'"“”‘’（）()\-+]/g, '')
+  return replaceSpokenDigits(value)
+    .toLocaleLowerCase()
+    .replace(/[\s，。！？、：；,.!?;:'"“”‘’（）()\-+]/g, '')
+}
+
+function digitsOnly(value) {
+  return replaceSpokenDigits(value).replace(/\D/g, '')
+}
+
+function chineseNumber(value) {
+  if (value < 10) return '零一二三四五六七八九'[value]
+  if (value === 10) return '十'
+  if (value < 20) return `十${chineseNumber(value - 10)}`
+  const tens = Math.floor(value / 10)
+  const ones = value % 10
+  return `${chineseNumber(tens)}十${ones ? chineseNumber(ones) : ''}`
+}
+
+function summaryLocalParts(summary) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: summary.merchant_time_zone,
+    year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(summary.starts_at)).map((part) => [part.type, part.value]))
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+  }
+}
+
+function includesAny(value, variants) {
+  return variants.some((variant) => value.includes(normalizedTranscript(variant)))
 }
 
 export function presentationTranscriptMatches(summary, transcript) {
@@ -364,16 +477,40 @@ export function presentationTranscriptMatches(summary, transcript) {
   const required = [
     summary.customer_name, summary.pet_name, summary.pet_species,
     summary.service_name_zh, summary.staff_display_name,
+    summary.pet_care_notes, summary.need_description,
   ].map(normalizedTranscript).filter(Boolean)
-  return required.every((value) => normalized.includes(value))
-    && normalized.includes('联系')
+  if (!required.every((value) => normalized.includes(value))) return false
+
+  const { year, month, day, hour, minute } = summaryLocalParts(summary)
+  const chineseYear = String(year).split('').map((digit) => chineseNumber(Number(digit))).join('')
+  const dateMatches = includesAny(normalized, [
+    `${year}年${month}月${day}日`,
+    `${chineseYear}年${chineseNumber(month)}月${chineseNumber(day)}日`,
+  ])
+  const paddedHour = String(hour).padStart(2, '0')
+  const paddedMinute = String(minute).padStart(2, '0')
+  const timeVariants = [
+    `${paddedHour}:${paddedMinute}`,
+    `${hour}点${minute ? `${minute}分` : ''}`,
+    `${chineseNumber(hour)}点${minute ? `${chineseNumber(minute)}分` : ''}`,
+  ]
+  if (minute === 30) timeVariants.push(`${hour}点半`, `${chineseNumber(hour)}点半`)
+  const timeMatches = includesAny(normalized, timeVariants)
+  const expectedPhone = digitsOnly(summary.contact_phone)
+  const phoneMatches = expectedPhone.length >= 7 && digitsOnly(transcript).includes(expectedPhone)
+
+  return dateMatches
+    && timeMatches
+    && phoneMatches
     && (normalized.includes('确认') || normalized.includes('预约'))
 }
 
 export class MerchantCoordinator {
   constructor({ toolClient }) {
     this.toolClient = toolClient
-    this.turnResults = new Map()
+    this.inflightCalls = new Map()
+    this.completedMutations = new Map()
+    this.sessionQueues = new Map()
     this.presentations = new Map()
     this.presentationWrites = new Map()
     this.operations = new Map()
@@ -399,12 +536,56 @@ export class MerchantCoordinator {
     if (!BUSINESS_TOOL_NAMES.includes(toolName)) {
       throw new Error(`unsupported pet reception business tool: ${toolName}`)
     }
-    const context = trustedContext(options)
-    const dedupeKey = [context.ownerId, context.sessionId, context.turnId, toolName, stableJson(args)].join('\u0000')
-    if (this.turnResults.has(dedupeKey)) return this.turnResults.get(dedupeKey)
-    const pending = this.executeBusinessTool(toolName, args, context)
-    boundedMapSet(this.turnResults, dedupeKey, pending)
-    return pending
+    const context = coordinatorContext(options)
+    const invocationKey = context.invocationId
+      ? [context.ownerId, context.sessionId, context.invocationId, toolName].join('\u0000')
+      : ''
+    if (invocationKey && this.completedMutations.has(invocationKey)) {
+      return this.completedMutations.get(invocationKey)
+    }
+    const inflightKey = invocationKey || [
+      context.ownerId,
+      context.sessionId,
+      context.turnId,
+      toolName,
+      stableJson(args),
+    ].join('\u0000')
+    if (this.inflightCalls.has(inflightKey)) return this.inflightCalls.get(inflightKey)
+
+    const execute = () => {
+      if (STATEFUL_TOOL_NAMES.has(toolName)) requireActiveTurn(context)
+      return this.executeBusinessTool(toolName, args, context)
+    }
+    const pending = STATEFUL_TOOL_NAMES.has(toolName)
+      ? this.enqueueSessionOperation(context, execute)
+      : execute()
+    boundedMapSet(this.inflightCalls, inflightKey, pending)
+    try {
+      const result = await pending
+      if (
+        invocationKey
+        && COMPLETED_DEDUPE_TOOL_NAMES.has(toolName)
+      ) {
+        boundedMapSet(this.completedMutations, invocationKey, result)
+      }
+      return result
+    } finally {
+      if (this.inflightCalls.get(inflightKey) === pending) {
+        this.inflightCalls.delete(inflightKey)
+      }
+    }
+  }
+
+  enqueueSessionOperation(context, execute) {
+    const key = `${context.ownerId}\u0000${context.sessionId}`
+    const previous = this.sessionQueues.get(key) || Promise.resolve()
+    const running = previous.catch(() => {}).then(execute)
+    const tail = running.catch(() => {})
+    this.sessionQueues.set(key, tail)
+    tail.finally(() => {
+      if (this.sessionQueues.get(key) === tail) this.sessionQueues.delete(key)
+    })
+    return running
   }
 
   async executeBusinessTool(toolName, args, context) {
@@ -413,14 +594,31 @@ export class MerchantCoordinator {
     }
     if (toolName === 'update_booking_draft') {
       const current = await this.toolClient.getBookingDraft(context)
+      requireActiveTurn(context)
       const updated = await this.toolClient.updateBookingDraft(
         context,
         draftPatch(args, current.draft.version),
       )
-      return { output: publicDraft(updated) }
+      const output = publicDraft(updated)
+      if (args.search_availability_after_update === true) {
+        if (updated.missing_for_availability?.length) {
+          output.follow_up = {
+            status: 'needs_input',
+            missing_fields: updated.missing_for_availability,
+          }
+        } else {
+          requireActiveTurn(context)
+          const availability = await this.toolClient.searchAvailability(context, {
+            expected_availability_revision: updated.draft.availability_revision,
+          })
+          output.availability = publicAvailability(availability).search
+        }
+      }
+      return { output }
     }
     if (toolName === 'search_availability') {
       const current = await this.toolClient.getBookingDraft(context)
+      requireActiveTurn(context)
       const result = await this.toolClient.searchAvailability(context, {
         expected_availability_revision: current.draft.availability_revision,
       })
@@ -428,6 +626,7 @@ export class MerchantCoordinator {
     }
     if (toolName === 'prepare_booking') {
       const current = await this.toolClient.getBookingDraft(context)
+      requireActiveTurn(context)
       const result = await this.toolClient.prepareBooking(context, {
         expected_version: current.draft.version,
         candidate_id: String(args.candidate_id || ''),
@@ -440,6 +639,7 @@ export class MerchantCoordinator {
         operationId: result.operation_id,
         expectedDraftVersion: preparation.draft_version,
         eventId: `presentation_${randomUUID()}`,
+        confirmationEventId: `confirmation_${randomUUID()}`,
         summaryDigest: preparation.summary_digest,
         summary: preparation.summary,
         speech: summarySpeech(preparation.summary),
@@ -470,12 +670,24 @@ export class MerchantCoordinator {
         this.presentationWrites.delete(preparationId)
         throw new BookingSummaryPlaybackRequiredError(presentation)
       }
-      const result = await this.toolClient.confirmBooking(
-        context,
-        preparationId,
-        presentation.expectedDraftVersion,
-        `confirmation_${randomUUID()}`,
-      )
+      requireActiveTurn(context)
+      let result
+      try {
+        result = await this.toolClient.confirmBooking(
+          context,
+          preparationId,
+          presentation.expectedDraftVersion,
+          presentation.confirmationEventId,
+        )
+      } catch (error) {
+        if (error?.code !== 'result_unknown') throw error
+        try {
+          result = await this.toolClient.getBookingStatus(context, presentation.operationId)
+        } catch {
+          error.operationId = presentation.operationId
+          throw error
+        }
+      }
       boundedMapSet(this.operations, result.operation_id, {
         ownerId: context.ownerId, sessionId: context.sessionId,
       })
@@ -486,11 +698,10 @@ export class MerchantCoordinator {
       }
     }
     const operationId = String(args.operation_id || '')
-    const operation = this.operations.get(operationId)
-    if (!operation || operation.ownerId !== context.ownerId || operation.sessionId !== context.sessionId) {
-      throw new Error('operation is not trusted in this gateway session')
-    }
     const result = await this.toolClient.getBookingStatus(context, operationId)
+    boundedMapSet(this.operations, result.operation_id || operationId, {
+      ownerId: context.ownerId, sessionId: context.sessionId,
+    })
     return {
       output: publicOperation(result),
       clientPresentation: customerPagePresentation(result),

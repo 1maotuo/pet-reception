@@ -1,13 +1,13 @@
 # Pet Reception
 
-面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库已完成 M4 的实现与自动化/真实千问文字联调：同一个 Qwen Realtime Session 可读取商家、批量写草稿、查真实演示排班、准备并受控播报摘要、在下一轮明确确认后生成待付款记录，以及查询同一操作状态。真人麦克风、扬声器、停顿和打断仍需用户完成 C 层阶段验收；尚未进入 M5。
+面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库已完成 M4 的实现、独立 Review 修复与自动化/真实千问文字复验：同一个 Qwen Realtime Session 可读取结构化美容目录与商家当地日期、批量写草稿并同轮查询真实排班、准备并受控播报摘要、在下一轮明确确认后生成待付款记录，以及查询同一操作状态。真人麦克风、扬声器、停顿和打断仍需用户完成 C 层阶段验收；尚未进入 M5。
 
 ## 当前组件
 
 - `web/`：React 19 + TypeScript 7 + Vite 8 状态页与客户预约凭证页。
 - `backend/`：FastAPI 后端，提供健康检查、持久化商家/草稿、真实排班、短时占位、确认事务、状态恢复及客户/商家结果 API。
 - `voice-gateway/`：固定 `qwen-audio-agent@1.11.0`，复用其 WebUI、实时音频、播放、打断和重连机制；注入确定性的受信业务 HTTP 协调器，并通过版本守卫补丁配置同一套服务端 VAD、逻辑会话问候去重、M4 六工具许可集合和播放完成回执。
-- `config/demo-merchant.json`：当前演示商家、前台角色、场景安全分流和能力开关的受信配置；后端和语音网关读取同一份商家来源。
+- `config/demo-merchant.json`：当前演示商家、结构化美容服务目录、前台角色、场景安全分流和能力开关的受信配置；后端将业务事实 seed 到 PostgreSQL，语音网关读取同一份身份与前台配置。
 - `compose.yaml`：绑定本机回环地址的 PostgreSQL 17.11 开发服务。
 - `scripts/check-m4.ps1`：运行全量数据库外回归、独立 `*_test` PostgreSQL 测试、构建、运行服务健康检查，以及开发库真实 HTTP 工具闭环探针。
 
@@ -48,6 +48,12 @@ backend\.venv\Scripts\python.exe -m pip install -e backend --no-deps
 `npm ci` 会运行历史文件名保留的 `scripts/apply-qwen-m1-patch.mjs`。它现在包含 M1–M4 所需的集中兼容钩子，只接受锁定的 Qwen Audio Agent 1.11.0；版本或源码锚点不匹配会停止安装，避免对未知上游静默打补丁。
 
 需要替换演示商家时，在本地 `.env` 同时设置匹配的 `DEMO_MERCHANT_ID` 和 `MERCHANT_CONFIG_PATH`，随后再次执行 `python -m pet_reception_backend.manage setup` 将配置 seed 到开发库。语音网关读取该受信文件，FastAPI 从 seed 后的 PostgreSQL 读取公开事实；文件内 ID 与环境变量不一致时启动失败，不会静默绑定到另一家商户。
+
+美容服务资料不是任意说明文字：每项服务可写 `supported_species`、`included_items`、
+`recommended_for`、`assessment_required_for`、`not_included` 和 `source`；商家级
+`grooming_policy` 写整体物种、人工评估、推荐与医疗边界。修改配置后必须重新执行 `manage setup`
+才会写入数据库。当前文件明确是演示数据，只支持犬；任何打结先由店员评估，不能由模型凭行业常识
+扩展成猫服务、医疗处理或承诺一定能处理打结。
 
 ## 启动
 
@@ -191,6 +197,8 @@ M3 业务入口保持在确定性 HTTP 层，并由 M4 的薄协调器暴露给�
 8. 摘要完整播完后，在新一轮说“确认，就按这个提交”。应只听到已生成 `BK-` 参考号并“等待本地模拟支付”；不能说正式确认，也不能出现 `PR-` 确认码。页面应另外显示“打开客户预约页面”的专属链接，助手不得朗读链接或 token。随后问状态，应返回同一参考号和待付款状态。
 9. 在提交播报期间插话，再问“刚才是不是已经约上了”。系统应查询原 `operation_id`，不再次提交；真实 DB 结果成功则报告同一记录，失败则如实报告。
 10. 结束并新建会话，确认新连接重新问候，旧会话草稿、候选、摘要和结果不串入新会话。
+11. 问“猫咪毛发打结能否做全套美容”。当前演示目录应明确只支持犬，并把任何打结转为店员评估，不能承诺猫可服务或凭常识补充目录没有的步骤。
+12. 在网页说“电话就是我现在打来的这个”。网页没有可信电话线路信息，助手应追问实际号码；后端也会拒绝 `incoming_phone` 等占位值。宠物名未提供时同样不能写成“未知”。
 
 当前模型只看到六个受控入口：`get_merchant_info`、`update_booking_draft`、`search_availability`、`prepare_booking`、`confirm_booking`、`get_booking_status`。上游通用的后台 Agent、记忆、清单、提醒和权限工具既不进入模型 Session，也会在被强制调用时由运行时拒绝。`request_human_callback` 尚未实现，不会伪装成可用工具。
 
@@ -211,6 +219,6 @@ VOICE_AUDIO_INPUT_LABEL=USB Audio Device
 
 ## 身份与密钥边界
 
-Qwen Gateway 使用签名的 HttpOnly 身份 Cookie。模型不能提交授权用的 `merchant_id`、`owner_id`、`session_id`、`turn_id`、呈现事件或确认事件。薄协调器从 Gateway 服务端上下文读取身份，以服务令牌调用 FastAPI；FastAPI 同时验证令牌和固定商家绑定。客户访问 token 与凭证 URL 不进入模型工具结果，只通过绑定到原 WebSocket 的页面卡片交付。摘要由服务端快照生成并走原版播放队列，只有浏览器回报完整播放结束且转写含关键摘要事实时才记录 `presented`；取消/打断播放不会放行确认。
+Qwen Gateway 使用签名的 HttpOnly 身份 Cookie。模型不能提交授权用的 `merchant_id`、`owner_id`、`session_id`、`turn_id`、呈现事件或确认事件。薄协调器从 Gateway 服务端上下文读取身份，以服务令牌调用 FastAPI；FastAPI 同时验证令牌和固定商家绑定。客户访问 token 与凭证 URL 不进入模型工具结果，只通过绑定到原 WebSocket 的页面卡片交付。摘要由服务端快照生成并走原版播放队列，只有播放、响应和转写都完成，且转写与服务端快照中的身份、服务、员工、护理事项、日期、时间和实际电话号码一致时才记录 `presented`；三类事件的到达顺序不影响最终一次上报，取消/打断播放不会被晚到事件重新放行。
 
-上游版本与扩展边界见 `docs/upstream/QWEN_AUDIO_AGENT.md`，本轮命令与结果见 `docs/evidence/M0_M1_2026-09-19.md`。
+上游版本与扩展边界见 `docs/upstream/QWEN_AUDIO_AGENT.md`，M4 Review 修复、测试结果和仍未执行的真人项见 `docs/evidence/M4_REVIEW_REMEDIATION_2026-09-20.md`。

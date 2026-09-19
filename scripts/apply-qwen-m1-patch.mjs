@@ -334,6 +334,7 @@ export function frontendTools(agentContext = {}) {
   staff_preference_text: { type: 'string', description: '用户原话中的员工偏好。' },
   staff_id: { type: 'string', description: '只能使用 get_merchant_info 返回的员工 ID。' },
   clear_fields: { type: 'array', items: { type: 'string', enum: ['customer_name', 'contact_phone', 'pet_name', 'pet_species', 'pet_breed', 'pet_age_years', 'pet_care_notes', 'need_description', 'service_id', 'preferred_date', 'preferred_time_of_day', 'staff_preference_text', 'staff_id'] }, uniqueItems: true, description: '仅在用户明确撤销或纠正字段时使用。' },
+  search_availability_after_update: { type: 'boolean', description: '仅当用户在本轮明确要求查询时间时设为 true；网关将在批量更新成功后立即查询，避免额外等待轮次。' },
 }
 
 const PET_RECEPTION_BUSINESS_TOOLS = [
@@ -341,7 +342,7 @@ const PET_RECEPTION_BUSINESS_TOOLS = [
     type: 'function',
     function: {
       name: 'get_merchant_info',
-      description: '读取服务端绑定的当前商家公开资料、服务、演示价格和可服务员工。商家和会话由网关注入，不接受相关参数。',
+      description: '读取服务端绑定的当前商家公开资料、商家当地日期、服务明细、适用宠物、推荐边界、演示价格和可服务员工。商家和会话由网关注入，不接受相关参数。',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
     },
   },
@@ -521,7 +522,20 @@ function mergeInputParts(...groups) {`,
         ownerId: this.ownerId,
         sessionId: this.sessionId,
         turnId,
+        turnGeneration: generation,
+        invocationId: callId,
+        isActive: () => !this.isStale(turnId, generation),
       })
+      if (result.clientPresentation?.content) {
+        this.sendClientEvent({
+          type: 'timeline.inline',
+          item: {
+            id: \`inline_business_\${callId}\`,
+            turnId,
+            ...result.clientPresentation,
+          },
+        })
+      }
       if (this.isStale(turnId, generation)) {
         await this.sendOutput(callId, {
           status: 'completed_after_interruption',
@@ -566,6 +580,17 @@ function mergeInputParts(...groups) {`,
       }
       await this.completeDeferredToolResponse(deferred)
     } catch (error) {
+      if (this.isStale(turnId, generation) || error?.code === 'stale_business_turn') {
+        await this.sendOutput(callId, {
+          status: 'ignored_after_interruption',
+          error: true,
+          error_code: error?.code || 'completed_after_interruption',
+          operation_id: error?.operationId,
+          message: '原语音轮次已经结束；不自动播报旧结果，也不覆盖较新的用户意图。',
+        }, turnId, null, { createResponse: false })
+        await this.completeDeferredToolResponse(deferred, { failed: true })
+        return
+      }
       const detail = error?.detail && typeof error.detail === 'object'
         ? error.detail
         : null
@@ -574,11 +599,14 @@ function mergeInputParts(...groups) {`,
         error?.code || 'business_tool_failed',
         replay || detail?.code === 'confirmation_not_ready'
           ? '预约摘要尚未完整播报，正在从受控入口重新播报。'
+          : error?.code === 'result_unknown'
+            ? '操作结果尚未核实；请查询同一个预约操作状态，不要重复提交。'
           : detail?.code === 'expired'
             ? '本次占位已过期，需要重新查询时间。'
             : '这项预约操作暂时没有成功，请根据返回状态继续处理。',
         {
-          retryable: Number(error?.status || 0) >= 500,
+          retryable: error?.code === 'result_unknown' || Number(error?.status || 0) >= 500,
+          ...(error?.operationId ? { operation_id: error.operationId } : {}),
           ...(detail ? { detail } : {}),
         },
       ), turnId, null, deferred || replay ? { createResponse: false } : undefined)
@@ -749,44 +777,120 @@ function mergeInputParts(...groups) {`,
   'bookingPresentation',
 ]`,
     },
+    {
+      label: 'M4 presentation lifecycle readiness predicate',
+      alreadyApplied: `export function bookingPresentationReady(context)`,
+      original: `export function ensureResponseContext(contexts, id, fallback = {}) {`,
+      replacement: `export function bookingPresentationReady(context) {
+  return Boolean(
+    context?.bookingPresentation
+    && context.playbackStarted
+    && context.playbackEnded
+    && context.responseDone
+    && context.transcriptDone
+    && !context.suppressed
+    && !context.presentationReported
+  )
+}
+
+export function ensureResponseContext(contexts, id, fallback = {}) {`,
+    },
   ])
 
   patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'realtime-gateway.mjs'), [
     {
-      label: 'mark M4 summary presented only after complete client playback',
-      alreadyApplied: `coordinator.markBookingPresented(`,
+      label: 'import M4 presentation lifecycle predicate',
+      alreadyApplied: `  bookingPresentationReady,`,
+      original: `  ensureResponseContext,
+  mergeResponseContext,`,
+      replacement: `  bookingPresentationReady,
+  ensureResponseContext,
+  mergeResponseContext,`,
+    },
+    {
+      label: 'report M4 presentation after lifecycle convergence',
+      alreadyApplied: `const reportBookingPresentationIfComplete = (id, context) => {`,
+      original: `    const finishResponseContextIfComplete = (id, context) => {`,
+      replacement: `    const reportBookingPresentationIfComplete = (id, context) => {
+      if (!bookingPresentationReady(context)) return
+      context.presentationReported = true
+      Promise.resolve(coordinator.markBookingPresented(
+        context.bookingPresentation,
+        {
+          ownerId,
+          sessionId,
+          turnId: context.turnId || turnId,
+          transcript: context.assistantTranscript || '',
+        },
+      )).then(result => {
+        if (result?.status === 'rejected') {
+          connectionLogger.warn('booking_summary.presentation_rejected', {
+            responseId: id,
+            reason: result.reason,
+          })
+        }
+      }).catch(error => connectionLogger.warn('booking_summary.presentation_failed', {
+        responseId: id,
+        error: error.message,
+      }))
+    }
+
+    const finishResponseContextIfComplete = (id, context) => {`,
+    },
+    {
+      label: 'mark M4 playback completion and re-evaluate presentation',
+      alreadyApplied: `        reportBookingPresentationIfComplete(id, context)
+        finishResponseContextIfComplete(id, context)`,
       original: `      playbackTurns.delete(id)
       if (context) {
         context.playbackEnded = true`,
       replacement: `      playbackTurns.delete(id)
-      if (
-        context?.bookingPresentation
-        && context.playbackStarted
-        && context.responseDone
-        && context.transcriptDone
-        && !context.presentationReported
-      ) {
-        context.presentationReported = true
-        Promise.resolve(coordinator.markBookingPresented(
-          context.bookingPresentation,
-          {
-            ownerId,
-            sessionId,
-            turnId: context.turnId || turnId,
-            transcript: context.assistantTranscript || '',
-          },
-        )).then(result => {
-          if (result?.status === 'rejected') {
-            connectionLogger.warn('booking_summary.presentation_rejected', {
-              reason: result.reason,
-            })
-          }
-        }).catch(error => connectionLogger.warn('booking_summary.presentation_failed', {
-          error: error.message,
-        }))
-      }
       if (context) {
-        context.playbackEnded = true`,
+        context.playbackEnded = true
+        reportBookingPresentationIfComplete(id, context)`,
+    },
+    {
+      label: 're-evaluate M4 presentation after transcript completion',
+      alreadyApplied: `        reportBookingPresentationIfComplete(id, context)
+        finishResponseContextIfComplete(id, context)
+      } else if (event.type === 'response.text.delta')`,
+      original: `        finishResponseContextIfComplete(id, context)
+      } else if (event.type === 'response.text.delta')`,
+      replacement: `        reportBookingPresentationIfComplete(id, context)
+        finishResponseContextIfComplete(id, context)
+      } else if (event.type === 'response.text.delta')`,
+    },
+    {
+      label: 're-evaluate M4 text presentation after transcript completion',
+      alreadyApplied: `        reportBookingPresentationIfComplete(id, context)
+        finishResponseContextIfComplete(id, context)
+      } else if (event.type === 'response.done')`,
+      original: `        emitAssistantTranscript({
+          id,
+          context,
+          content: event.text || '',
+          final: true,
+        })
+      } else if (event.type === 'response.done')`,
+      replacement: `        emitAssistantTranscript({
+          id,
+          context,
+          content: event.text || '',
+          final: true,
+        })
+        reportBookingPresentationIfComplete(id, context)
+        finishResponseContextIfComplete(id, context)
+      } else if (event.type === 'response.done')`,
+    },
+    {
+      label: 're-evaluate M4 presentation after response completion',
+      alreadyApplied: `          reportBookingPresentationIfComplete(id, responseContext)
+          finishResponseContextIfComplete(id, responseContext)`,
+      original: `          responseContext.responseDone = true
+          finishResponseContextIfComplete(id, responseContext)`,
+      replacement: `          responseContext.responseDone = true
+          reportBookingPresentationIfComplete(id, responseContext)
+          finishResponseContextIfComplete(id, responseContext)`,
     },
   ])
 

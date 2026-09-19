@@ -40,6 +40,13 @@ test('actual Qwen session exposes only the six bounded M4 business tools', async
   assert.equal(update.function.parameters.additionalProperties, false)
   assert.equal(Object.hasOwn(update.function.parameters.properties, 'merchant_id'), false)
   assert.equal(Object.hasOwn(update.function.parameters.properties, 'owner_id'), false)
+  assert.equal(
+    update.function.parameters.properties.search_availability_after_update.type,
+    'boolean',
+  )
+  const merchantInfo = session.tools.find((tool) => tool.function.name === 'get_merchant_info')
+  assert.match(merchantInfo.function.description, /商家当地日期/)
+  assert.match(merchantInfo.function.description, /推荐边界/)
   assert.match(confirm.function.description, /新一轮明确确认/)
   assert.doesNotMatch(session.tools.map((tool) => tool.function.name).join(','), /spawn_thinking|memory|notes|schedule/)
 })

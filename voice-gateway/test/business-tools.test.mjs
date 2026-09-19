@@ -76,6 +76,17 @@ function preparationResult() {
   }
 }
 
+function completeSummaryTranscript() {
+  return [
+    '请您确认预约摘要。',
+    '王女士，为犬豆包预约基础洗护，',
+    '2026年10月6日星期二09:00，由Lisa服务。',
+    '联系电话是+86-138-0000-0000。',
+    '备注：耳朵敏感；轻微打结。',
+    '如果以上信息正确，请在我说完后明确确认；现在还没有创建正式预约。',
+  ].join('')
+}
+
 test('draft update is batched, versioned by the gateway, scoped, and de-duplicated per turn', async () => {
   const calls = []
   const toolClient = {
@@ -101,8 +112,9 @@ test('draft update is batched, versioned by the gateway, scoped, and de-duplicat
     owner_id: 'attacker-owner',
   }
 
-  const first = await coordinator.runBusinessTool('update_booking_draft', args, context)
-  const second = await coordinator.runBusinessTool('update_booking_draft', args, context)
+  const invocationContext = { ...context, invocationId: 'call-draft-update' }
+  const first = await coordinator.runBusinessTool('update_booking_draft', args, invocationContext)
+  const second = await coordinator.runBusinessTool('update_booking_draft', args, invocationContext)
 
   assert.equal(calls.length, 2)
   assert.deepEqual(calls[1][2], {
@@ -181,7 +193,15 @@ test('controlled summary requires a matching full playback transcript before pre
     /not trusted in this gateway session/,
   )
 
-  const transcript = '请确认预约：王女士为犬豆包预约基础洗护，由 Lisa 服务，联系电话已核对。'
+  const omittedDateTimePhone = '请确认预约：王女士为犬豆包预约基础洗护，由 Lisa 服务，备注耳朵敏感、轻微打结，联系电话已核对。'
+  assert.equal(presentationTranscriptMatches(summary(), omittedDateTimePhone), false)
+  const wrongFacts = '请确认预约：王女士为犬豆包预约基础洗护，2027年12月31日22:00，由 Lisa 服务，联系电话999999，备注耳朵敏感、轻微打结。'
+  assert.equal(presentationTranscriptMatches(summary(), wrongFacts), false)
+  const spokenPhone = summary().contact_phone.replace(/\D/g, '').replace(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)])
+  const chineseDigitEquivalent = completeSummaryTranscript().replace(summary().contact_phone, spokenPhone)
+  assert.equal(presentationTranscriptMatches(summary(), chineseDigitEquivalent), true)
+
+  const transcript = completeSummaryTranscript()
   const marked = await coordinator.markBookingPresented(
     {
       preparationId: prepared.presentation.preparationId,
@@ -230,7 +250,7 @@ test('confirmation waits for presentation persistence and hides customer credent
     { candidate_id: '33333333-3333-4333-8333-333333333333' },
     context,
   )
-  const transcript = '请确认预约：王女士为犬豆包预约基础洗护，由 Lisa 服务，联系电话已核对。'
+  const transcript = completeSummaryTranscript()
   const marking = coordinator.markBookingPresented(
     {
       preparationId: prepared.presentation.preparationId,
@@ -259,6 +279,274 @@ test('confirmation waits for presentation persistence and hides customer credent
   assert.equal(JSON.stringify(confirmed.output).includes('secret-token'), false)
   assert.match(confirmed.clientPresentation.content, /打开客户预约页面/)
   assert.match(confirmed.clientPresentation.content, /secret-token/)
+})
+
+test('same-turn read after a draft change re-queries current availability', async () => {
+  let state = { version: 2, availability_revision: 1, preferred_date: '2026-10-06' }
+  let searchCalls = 0
+  const toolClient = {
+    getBookingDraft: async () => ({ draft: draft(state) }),
+    updateBookingDraft: async (_received, patch) => {
+      assert.equal(patch.expected_version, state.version)
+      state = {
+        ...state,
+        version: state.version + 1,
+        availability_revision: state.availability_revision + 1,
+        preferred_date: patch.preferred_date,
+      }
+      return {
+        draft: draft(state),
+        changed_fields: ['preferred_date'],
+        missing_for_availability: [],
+        missing_for_booking: ['selected_availability'],
+      }
+    },
+    searchAvailability: async () => {
+      searchCalls += 1
+      return { search: { preferred_date: state.preferred_date, is_current: true } }
+    },
+  }
+  const coordinator = new MerchantCoordinator({ toolClient })
+
+  const first = await coordinator.runBusinessTool('search_availability', {}, context)
+  await coordinator.runBusinessTool(
+    'update_booking_draft',
+    { preferred_date: '2026-10-07' },
+    context,
+  )
+  const second = await coordinator.runBusinessTool('search_availability', {}, context)
+
+  assert.equal(first.output.search.preferred_date, '2026-10-06')
+  assert.equal(second.output.search.preferred_date, '2026-10-07')
+  assert.equal(searchCalls, 2)
+})
+
+test('draft update can continue directly to availability without a user nudge', async () => {
+  const calls = []
+  const toolClient = {
+    getBookingDraft: async () => ({ draft: draft() }),
+    updateBookingDraft: async (_received, patch) => {
+      calls.push(['update', patch])
+      return {
+        draft: draft({
+          version: 3,
+          availability_revision: 2,
+          preferred_date: '2026-10-07',
+        }),
+        changed_fields: ['preferred_date'],
+        missing_for_availability: [],
+        missing_for_booking: ['selected_availability'],
+      }
+    },
+    searchAvailability: async (_received, body) => {
+      calls.push(['search', body])
+      return { search: { preferred_date: '2026-10-07', status: 'available' } }
+    },
+  }
+  const result = await new MerchantCoordinator({ toolClient }).runBusinessTool(
+    'update_booking_draft',
+    {
+      preferred_date: '2026-10-07',
+      search_availability_after_update: true,
+    },
+    context,
+  )
+
+  assert.deepEqual(calls, [
+    ['update', { expected_version: 2, preferred_date: '2026-10-07' }],
+    ['search', { expected_availability_revision: 2 }],
+  ])
+  assert.equal(result.output.availability.preferred_date, '2026-10-07')
+})
+
+test('an interrupted old mutation cannot overwrite a newer user turn', async () => {
+  let state = { version: 1, preferred_date: '2026-10-06' }
+  let activeGeneration = 1
+  let releaseOldRead
+  let markOldReadStarted
+  const oldReadStarted = new Promise((resolve) => { markOldReadStarted = resolve })
+  const oldReadPending = new Promise((resolve) => { releaseOldRead = resolve })
+  const history = []
+  const toolClient = {
+    getBookingDraft: async (received) => {
+      if (received.turnId === 'old-turn') {
+        markOldReadStarted()
+        await oldReadPending
+      }
+      return { draft: draft(state) }
+    },
+    updateBookingDraft: async (received, patch) => {
+      assert.equal(patch.expected_version, state.version)
+      state = { version: state.version + 1, preferred_date: patch.preferred_date }
+      history.push([received.turnId, state.preferred_date])
+      return {
+        draft: draft(state),
+        changed_fields: ['preferred_date'],
+        missing_for_availability: [],
+        missing_for_booking: ['selected_availability'],
+      }
+    },
+  }
+  const coordinator = new MerchantCoordinator({ toolClient })
+  const older = coordinator.runBusinessTool(
+    'update_booking_draft',
+    { preferred_date: '2026-10-07' },
+    {
+      ...context,
+      turnId: 'old-turn',
+      turnGeneration: 1,
+      invocationId: 'old-call',
+      isActive: () => activeGeneration === 1,
+    },
+  )
+  await oldReadStarted
+  activeGeneration = 2
+  const newer = coordinator.runBusinessTool(
+    'update_booking_draft',
+    { preferred_date: '2026-10-08' },
+    {
+      ...context,
+      turnId: 'new-turn',
+      turnGeneration: 2,
+      invocationId: 'new-call',
+      isActive: () => activeGeneration === 2,
+    },
+  )
+  releaseOldRead()
+
+  await assert.rejects(older, { code: 'stale_business_turn' })
+  await newer
+  assert.deepEqual(history, [['new-turn', '2026-10-08']])
+  assert.equal(state.preferred_date, '2026-10-08')
+})
+
+test('transient read failures are not cached and can be retried', async () => {
+  let attempts = 0
+  const coordinator = new MerchantCoordinator({
+    toolClient: {
+      getMerchantInfo: async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error('temporary failure')
+        return {
+          merchant: {
+            id: 'demo-grooming-001', display_name: 'Demo', address: 'Demo',
+            phone: '+1-415-555-0100', time_zone: 'America/Los_Angeles',
+            is_demo: true, source: 'test', services: [], staff: [],
+          },
+          merchant_local_date: '2026-09-19',
+          merchant_local_datetime: '2026-09-19T10:00:00-07:00',
+        }
+      },
+    },
+  })
+
+  await assert.rejects(coordinator.runBusinessTool('get_merchant_info', {}, context))
+  const retried = await coordinator.runBusinessTool('get_merchant_info', {}, context)
+  assert.equal(retried.output.status, 'ok')
+  assert.equal(attempts, 2)
+})
+
+test('booking status is recoverable after coordinator restart and cards match persisted status', async () => {
+  const statusReads = []
+  const credential = {
+    booking_reference: 'BK-DEMO',
+    access_token: 'client-only-token',
+    credential_url: 'http://example.test/#token=client-only-token',
+  }
+  let status = 'confirmed'
+  const toolClient = {
+    getBookingStatus: async (received, operationId) => {
+      statusReads.push([received.ownerId, received.sessionId, operationId])
+      if (received.ownerId !== context.ownerId || received.sessionId !== context.sessionId) {
+        throw new Error('backend rejected untrusted operation context')
+      }
+      return {
+        operation_id: preparationResult().operation_id,
+        status,
+        booking: {
+          status,
+          confirmation_code: status === 'confirmed' ? 'PR-DEMO' : null,
+        },
+        customer_credential: credential,
+      }
+    },
+  }
+  const restarted = new MerchantCoordinator({ toolClient })
+  const confirmed = await restarted.runBusinessTool(
+    'get_booking_status',
+    { operation_id: preparationResult().operation_id },
+    { ...context, turnId: 'status-after-restart' },
+  )
+  assert.equal(confirmed.output.status, 'confirmed')
+  assert.match(confirmed.clientPresentation.content, /预约已正式确认/)
+  assert.doesNotMatch(confirmed.clientPresentation.content, /当前为等待本地模拟支付/)
+
+  status = 'payment_expired'
+  const expired = await restarted.runBusinessTool(
+    'get_booking_status',
+    { operation_id: preparationResult().operation_id },
+    { ...context, turnId: 'status-expired' },
+  )
+  assert.match(expired.clientPresentation.content, /付款占位已过期/)
+  assert.equal(JSON.stringify(expired.output).includes('client-only-token'), false)
+
+  await assert.rejects(
+    restarted.runBusinessTool(
+      'get_booking_status',
+      { operation_id: preparationResult().operation_id },
+      { ...context, ownerId: 'attacker', turnId: 'status-attacker' },
+    ),
+    /backend rejected untrusted operation context/,
+  )
+  assert.equal(statusReads.length, 3)
+})
+
+test('an uncertain confirmation response is verified by operation id without resubmitting', async () => {
+  let confirmCalls = 0
+  let statusCalls = 0
+  const toolClient = {
+    getBookingDraft: async () => ({ draft: draft() }),
+    prepareBooking: async () => preparationResult(),
+    markBookingPresented: async () => ({ ...preparationResult(), status: 'presented' }),
+    confirmBooking: async () => {
+      confirmCalls += 1
+      const error = new Error('connection ended after write')
+      error.code = 'result_unknown'
+      throw error
+    },
+    getBookingStatus: async (_received, operationId) => {
+      statusCalls += 1
+      assert.equal(operationId, preparationResult().operation_id)
+      return {
+        operation_id: operationId,
+        status: 'awaiting_payment',
+        booking: { status: 'awaiting_payment', customer_reference: 'BK-RECOVERED' },
+        customer_credential: null,
+      }
+    },
+  }
+  const coordinator = new MerchantCoordinator({ toolClient })
+  const prepared = await coordinator.runBusinessTool(
+    'prepare_booking',
+    { candidate_id: '33333333-3333-4333-8333-333333333333' },
+    context,
+  )
+  await coordinator.markBookingPresented(
+    {
+      preparationId: prepared.presentation.preparationId,
+      eventId: prepared.presentation.eventId,
+    },
+    { ...context, transcript: completeSummaryTranscript() },
+  )
+  const result = await coordinator.runBusinessTool(
+    'confirm_booking',
+    { preparation_id: prepared.presentation.preparationId },
+    { ...context, turnId: 'turn-confirm-unknown', invocationId: 'confirm-unknown' },
+  )
+
+  assert.equal(result.output.status, 'awaiting_payment')
+  assert.equal(confirmCalls, 1)
+  assert.equal(statusCalls, 1)
 })
 
 test('late business result is attached without causing speech or a second submit', async () => {
@@ -296,7 +584,12 @@ test('late business result is attached without causing speech or a second submit
     sendClientEvent: (event) => clientEvents.push(event),
     coordinator: {
       runBusinessTool: async (_name, _args, received) => {
-        assert.deepEqual(received, context)
+        assert.equal(received.ownerId, context.ownerId)
+        assert.equal(received.sessionId, context.sessionId)
+        assert.equal(received.turnId, context.turnId)
+        assert.equal(received.turnGeneration, 0)
+        assert.equal(received.invocationId, 'call-a')
+        assert.equal(received.isActive(), true)
         return pending
       },
     },
@@ -326,6 +619,51 @@ test('late business result is attached without causing speech or a second submit
   assert.equal(clientEvents.length, 1)
   assert.match(clientEvents[0].item.content, /client-only/)
   assert.equal(JSON.stringify(outputs).includes('client-only'), false)
+})
+
+test('a stale business failure is silent just like a stale success', async () => {
+  process.env.PET_RECEPTION_FRONTEND_TOOL_ALLOWLIST = 'search_availability'
+  const require = createRequire(import.meta.url)
+  const qwenRoot = dirname(require.resolve('qwen-audio-agent/package.json'))
+  const { ToolCallHandler } = await import(pathToFileURL(resolve(
+    qwenRoot,
+    'server',
+    'src',
+    'voice',
+    'tools',
+    'tool-call-handler.mjs',
+  )))
+  let rejectTool
+  const pending = new Promise((_resolve, reject) => { rejectTool = reject })
+  let generation = 0
+  const outputs = []
+  const handler = new ToolCallHandler({
+    taskManager: {},
+    ownerId: context.ownerId,
+    sessionId: context.sessionId,
+    transcripts: {},
+    getFrontend: () => ({
+      sendFunctionOutput: async (_callId, output, _context, options) => {
+        outputs.push([output, options])
+      },
+    }),
+    getTurnId: () => generation ? 'turn-b' : 'turn-a',
+    getTurnGeneration: () => generation,
+    coordinator: { runBusinessTool: async () => pending },
+  })
+
+  const handling = handler.handle({
+    call_id: 'call-stale-failure',
+    name: 'search_availability',
+    arguments: '{}',
+  }, { turnId: 'turn-a', turnGeneration: 0 })
+  generation = 1
+  rejectTool(new Error('old request failed'))
+  await handling
+
+  assert.equal(outputs.length, 1)
+  assert.equal(outputs[0][0].status, 'ignored_after_interruption')
+  assert.equal(outputs[0][1].createResponse, false)
 })
 
 test('an interrupted summary confirmation replays through the controlled speak path', async () => {

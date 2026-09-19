@@ -79,6 +79,20 @@ def test_seeded_merchant_is_read_from_postgres(client: TestClient) -> None:
         "demo-bath",
         "demo-full-groom",
     ]
+    assert merchant["grooming_policy"]["supported_species"] == ["犬"]
+    assert merchant["grooming_policy"]["unsupported_species"] == [
+        "猫",
+        "爬行动物",
+        "鸟类",
+        "其他非犬宠物",
+    ]
+    bath, full_groom = merchant["services"]
+    assert bath["supported_species"] == ["犬"]
+    assert "洗澡" in bath["included_items"]
+    assert "毛发没有明显打结" in bath["recommended_for"]
+    assert "任何毛发打结" in bath["assessment_required_for"]
+    assert "剪毛造型" in bath["not_included"]
+    assert full_groom["source"] == "m4-demo-grooming-catalog:demo-full-groom"
 
 
 def test_draft_batch_update_correction_clear_and_same_value(
@@ -223,6 +237,29 @@ def test_draft_rejects_implicit_null_and_unknown_service(client: TestClient) -> 
     )
     assert current.json()["draft"]["version"] == 0
     assert current.json()["draft"]["service_id"] is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"contact_phone": "incoming_phone"},
+        {"contact_phone": "当前电话"},
+        {"contact_phone": "123"},
+        {"pet_name": "未知"},
+        {"pet_name": "unknown"},
+    ],
+)
+def test_draft_rejects_placeholder_contact_and_pet_values(
+    client: TestClient,
+    payload: dict,
+) -> None:
+    response = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=headers(),
+        json={"expected_version": 0, **payload},
+    )
+
+    assert response.status_code == 422
 
 
 def test_draft_rejects_identity_and_provenance_in_request_body(

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from typing import Protocol
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -81,8 +81,13 @@ class AvailabilitySearchNotFoundError(LookupError):
     pass
 
 
+@dataclass(slots=True)
 class AvailabilityPastDateError(ValueError):
-    pass
+    preferred_date: date
+    merchant_today: date
+
+    def __str__(self) -> str:
+        return self.preferred_date.isoformat()
 
 
 @dataclass(slots=True)
@@ -255,6 +260,12 @@ class PostgresStore:
                     name_zh=row["name_zh"],
                     duration_minutes=row["duration_minutes"],
                     price_note=row["price_note"],
+                    supported_species=row["supported_species"] or [],
+                    included_items=row["included_items"] or [],
+                    recommended_for=row["recommended_for"] or [],
+                    assessment_required_for=row["assessment_required_for"] or [],
+                    not_included=row["not_included"] or [],
+                    source=row["source"],
                 )
                 for row in service_rows
             ]
@@ -300,6 +311,7 @@ class PostgresStore:
             source=merchant_row["source"],
             services=services,
             staff=staff,
+            grooming_policy=merchant_row["grooming_policy"],
         )
 
     def upsert_merchant(self, merchant: DemoMerchant) -> None:
@@ -314,6 +326,11 @@ class PostgresStore:
             "address": merchant.address,
             "is_demo": merchant.is_demo,
             "source": merchant.source,
+            "grooming_policy": (
+                merchant.grooming_policy.model_dump(mode="json")
+                if merchant.grooming_policy
+                else None
+            ),
             "slot_interval_minutes": (
                 scheduling.slot_interval_minutes if scheduling else 30
             ),
@@ -376,6 +393,12 @@ class PostgresStore:
                     "name_zh": service.name_zh,
                     "duration_minutes": service.duration_minutes,
                     "price_note": service.price_note,
+                    "supported_species": service.supported_species,
+                    "included_items": service.included_items,
+                    "recommended_for": service.recommended_for,
+                    "assessment_required_for": service.assessment_required_for,
+                    "not_included": service.not_included,
+                    "source": service.source or merchant.source,
                     "active": True,
                     "display_order": display_order,
                     "buffer_before_minutes": (
@@ -846,7 +869,10 @@ class PostgresStore:
                 raise MerchantNotFoundError(context.merchant_id)
             merchant_today = self.now_provider(ZoneInfo(merchant["time_zone"])).date()
             if draft["preferred_date"] < merchant_today:
-                raise AvailabilityPastDateError(draft["preferred_date"].isoformat())
+                raise AvailabilityPastDateError(
+                    preferred_date=draft["preferred_date"],
+                    merchant_today=merchant_today,
+                )
             service = connection.execute(
                 select(merchant_services).where(
                     merchant_services.c.merchant_id == context.merchant_id,

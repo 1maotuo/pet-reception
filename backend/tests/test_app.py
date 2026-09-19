@@ -151,6 +151,8 @@ def test_voice_tool_uses_gateway_bound_context() -> None:
     assert body["merchant"]["id"] == "demo-grooming-001"
     assert body["merchant"]["is_demo"] is True
     assert body["merchant"]["source"] == "m1-static-demo-catalog:demo-grooming-001"
+    assert body["merchant_local_date"]
+    assert body["merchant_local_datetime"]
     assert body["context"] == {
         "merchant_id": "demo-grooming-001",
         "owner_id": "user_signed-owner",
