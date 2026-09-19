@@ -505,24 +505,54 @@ function parseChineseInteger(value) {
   return total + current
 }
 
+function periodAdjustedHour(period, rawHour) {
+  let hour = rawHour
+  if (period === '凌晨' && hour === 12) hour = 0
+  if (period === '上午' && hour === 12) hour = 0
+  if (['下午', '晚上', '中午'].includes(period) && hour < 12) hour += 12
+  return hour
+}
+
+function timeMentionRole(source, index) {
+  const before = source.slice(Math.max(0, index - 10), index).replace(/\s/g, '')
+  return /(?:结束时间?|截止时间?|截至|到)$/.test(before) ? 'end' : 'start'
+}
+
 function mentionedTimes(value) {
   const source = String(value || '')
-  const times = new Set()
-  for (const match of source.matchAll(/(?:^|\D)([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)/g)) {
-    times.add(`${String(Number(match[1])).padStart(2, '0')}:${match[2]}`)
+  const mentions = []
+  const colon = /(上午|下午|晚上|中午|凌晨)?\s*([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)/g
+  for (const match of source.matchAll(colon)) {
+    const hour = periodAdjustedHour(match[1] || '', Number(match[2]))
+    if (hour > 23) continue
+    mentions.push({
+      index: match.index,
+      role: timeMentionRole(source, match.index),
+      value: `${String(hour).padStart(2, '0')}:${match[3]}`,
+    })
   }
   const spoken = /(上午|下午|晚上|中午|凌晨)?([0-9]{1,2}|[零〇一二两三四五六七八九十]+)(?:点|时)(半|([0-9]{1,2}|[零〇一二两三四五六七八九十]+)分?)?/g
   for (const match of source.matchAll(spoken)) {
     let hour = parseChineseInteger(match[2])
-    let minute = match[3] === '半' ? 30 : (match[4] ? parseChineseInteger(match[4]) : 0)
+    const minute = match[3] === '半' ? 30 : (match[4] ? parseChineseInteger(match[4]) : 0)
     const period = match[1] || ''
     if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute > 59) continue
-    if (period === '凌晨' && hour === 12) hour = 0
-    if (period === '上午' && hour === 12) hour = 0
-    if (['下午', '晚上', '中午'].includes(period) && hour < 12) hour += 12
-    if (hour <= 23) times.add(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`)
+    hour = periodAdjustedHour(period, hour)
+    if (hour <= 23) {
+      mentions.push({
+        index: match.index,
+        role: timeMentionRole(source, match.index),
+        value: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`,
+      })
+    }
   }
-  return times
+  return mentions.sort((left, right) => left.index - right.index)
+}
+
+function containsTimeCorrection(value) {
+  return /(?:不是|不对|改成|改为|应该是|而是).{0,12}(?:[0-2]?\d[:：][0-5]\d|[0-9零〇一二两三四五六七八九十]{1,3}(?:点|时))/.test(
+    String(value || ''),
+  )
 }
 
 function mentionedPhones(value) {
@@ -581,7 +611,14 @@ export function presentationTranscriptMatches(summary, transcript) {
     `${chineseYear}年${chineseNumber(month)}月${chineseNumber(day)}日`,
   ])
   const expectedTime = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
-  const timeMatches = mentionedTimes(transcript).has(expectedTime)
+  const mentionedStartTimes = new Set(
+    mentionedTimes(transcript)
+      .filter((mention) => mention.role === 'start')
+      .map((mention) => mention.value),
+  )
+  const timeMatches = !containsTimeCorrection(transcript)
+    && mentionedStartTimes.size === 1
+    && mentionedStartTimes.has(expectedTime)
   const expectedPhone = digitsOnly(summary.contact_phone)
   const phoneMatches = expectedPhone.length >= 7 && mentionedPhones(transcript).has(expectedPhone)
 

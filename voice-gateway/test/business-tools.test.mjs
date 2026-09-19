@@ -238,6 +238,55 @@ test('controlled summary compares exact local time and exact phone instead of su
   )
   assert.equal(
     presentationTranscriptMatches(
+      { ...summary(), starts_at: '2026-10-06T13:30:00-07:00' },
+      completeSummaryTranscript().replace('09:00', '下午1:30'),
+    ),
+    true,
+  )
+  assert.equal(
+    presentationTranscriptMatches(
+      { ...summary(), starts_at: '2026-10-06T13:30:00-07:00' },
+      completeSummaryTranscript().replace('09:00', '下午一点半'),
+    ),
+    true,
+  )
+  assert.equal(
+    presentationTranscriptMatches(
+      summary(),
+      completeSummaryTranscript().replace('09:00', '上午九点'),
+    ),
+    true,
+  )
+  assert.equal(
+    presentationTranscriptMatches(
+      summary(),
+      completeSummaryTranscript().replace('09:00', '晚上9:00'),
+    ),
+    false,
+  )
+  assert.equal(
+    presentationTranscriptMatches(
+      summary(),
+      completeSummaryTranscript().replace('09:00', '不是九点，是九点半'),
+    ),
+    false,
+  )
+  assert.equal(
+    presentationTranscriptMatches(
+      { ...summary(), starts_at: '2026-10-06T10:00:00-07:00' },
+      completeSummaryTranscript().replace('09:00', '上午九点到十点'),
+    ),
+    false,
+  )
+  assert.equal(
+    presentationTranscriptMatches(
+      summary(),
+      completeSummaryTranscript().replace('09:00', '结束时间上午九点'),
+    ),
+    false,
+  )
+  assert.equal(
+    presentationTranscriptMatches(
       summary(),
       completeSummaryTranscript().replace('+86-138-0000-0000', '+86-138-0000-00001'),
     ),
