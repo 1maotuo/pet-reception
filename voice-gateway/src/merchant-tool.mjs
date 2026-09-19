@@ -1,4 +1,10 @@
 import { randomUUID } from 'node:crypto'
+import {
+  projectAvailabilityReceipt,
+  projectDraftReceipt,
+  projectOperationReceipt,
+  projectRejectedReceipt,
+} from './business-view.mjs'
 
 const TRUSTED_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const DRAFT_FIELDS = new Set([
@@ -324,6 +330,15 @@ function merchantFacts(result) {
   const merchant = result.merchant
   return {
     status: 'ok',
+    current_state: {
+      merchant: {
+        display_name: merchant.display_name,
+        time_zone: merchant.time_zone,
+        local_date: result.merchant_local_date,
+      },
+    },
+    effect: { type: 'merchant_information_read', applied: true },
+    next_step: { type: 'answer_customer_question' },
     type: 'trusted_merchant_public_info',
     merchant: {
       id: merchant.id,
@@ -354,8 +369,6 @@ function merchantFacts(result) {
     relative_date_rule: '今天、明天、后天和下周几必须以 merchant.local_date 与 merchant.time_zone 为准。',
     recommendation_rule: '只能根据受信目录的适用宠物、包含项目、推荐条件、需评估条件和不包含项目回答；缺失内容必须说未知。',
     data_boundary: '资料来自受信演示目录；价格是演示参考，不是正式报价，需评估项目不是已承诺可做。',
-    availability_checked: false,
-    booking_created: false,
   }
 }
 
@@ -389,51 +402,8 @@ function merchantInline(result) {
   ].join('\n')
 }
 
-function publicDraft(result) {
-  const { merchant_id, owner_id, voice_session_id, ...draft } = result.draft
-  return {
-    status: 'ok', draft,
-    changed_fields: result.changed_fields || [],
-    missing_for_availability: result.missing_for_availability,
-    missing_for_booking: result.missing_for_booking,
-  }
-}
-
-function publicAvailability(result) {
-  const { draft_id, ...search } = result.search
-  const nextAction = search.status === 'no_availability'
-    ? {
-        type: 'select_alternative_date',
-        instruction: '用户选择替代日期后，必须先调用 update_booking_draft 写入 preferred_date，并设置 search_availability_after_update=true；成功返回具体 candidates 前不得声称已有具体时段。',
-      }
-    : search.candidates?.length
-      ? {
-          type: 'select_returned_candidate',
-          instruction: '只能从本次 candidates 中选择；向客户播报当地时间，不朗读 candidate_id。',
-        }
-      : {
-          type: 'stop_and_explain',
-          instruction: '当前没有可选择的具体候选，不得调用 prepare_booking。',
-        }
-  return { status: 'ok', search, next_action: nextAction }
-}
-
 function publicOperation(result) {
-  const safe = {
-    operation_id: result.operation_id,
-    status: result.status,
-    preparation: result.preparation,
-    booking: result.booking,
-  }
-  if (result.customer_credential) {
-    safe.customer_action = {
-      payment_required: result.status === 'awaiting_payment',
-      booking_reference: result.customer_credential.booking_reference,
-      customer_page_available: true,
-      security_note: '访问令牌和链接只交给受控界面，不提供给模型，也不要朗读。',
-    }
-  }
-  return safe
+  return projectOperationReceipt(result)
 }
 
 function customerPagePresentation(result) {
@@ -761,11 +731,21 @@ export class MerchantCoordinator {
     if (toolName === 'update_booking_draft') {
       const current = await this.toolClient.getBookingDraft(context)
       requireActiveTurn(context)
-      const updated = await this.toolClient.updateBookingDraft(
-        context,
-        draftPatch(args, current.draft.version),
-      )
-      const output = publicDraft(updated)
+      let updated
+      try {
+        updated = await this.toolClient.updateBookingDraft(
+          context,
+          draftPatch(args, current.draft.version),
+        )
+      } catch (error) {
+        if (error?.code === 'booking_already_submitted') throw error
+        if ([409, 422].includes(error?.status)) {
+          return {
+            output: projectRejectedReceipt('update_booking_draft', error, current),
+          }
+        }
+        throw error
+      }
       if ((updated.changed_fields || []).some((field) => (
         [
           'service_id',
@@ -781,32 +761,34 @@ export class MerchantCoordinator {
           preferred_date: updated.draft.preferred_date,
         })
       }
+      let availabilityResult
+      let availabilityError
       if (args.search_availability_after_update === true) {
-        if (updated.missing_for_availability?.length) {
-          output.follow_up = {
-            status: 'needs_input',
-            missing_fields: updated.missing_for_availability,
-          }
-        } else {
+        if (!updated.missing_for_availability?.length) {
           requireActiveTurn(context)
           try {
-            const availability = await this.toolClient.searchAvailability(context, {
+            availabilityResult = await this.toolClient.searchAvailability(context, {
               expected_availability_revision: updated.draft.availability_revision,
             })
-            const publicResult = publicAvailability(availability)
-            output.availability = publicResult.search
-            output.next_action = publicResult.next_action
-            boundedMapSet(this.currentAvailability, sessionKey, publicResult.search)
           } catch (error) {
             if (error?.code === 'stale_business_turn') throw error
-            output.follow_up = {
-              status: 'availability_failed',
-              error_code: error?.code || 'availability_query_failed',
-              retryable: error?.code !== 'booking_already_submitted',
-              message: '预约资料已保存，但排班查询没有成功。',
-              ...(error?.detail ? { detail: error.detail } : {}),
-            }
+            availabilityError = error
           }
+        }
+      }
+      const output = projectDraftReceipt(updated, {
+          searchRequested: args.search_availability_after_update === true,
+          availabilityResult,
+          availabilityError,
+        })
+      if (availabilityResult) {
+        if (output.current_state.availability?.belongs_to_current_draft) {
+          boundedMapSet(this.currentAvailability, sessionKey, availabilityResult.search)
+        } else {
+          boundedMapSet(this.currentAvailability, sessionKey, {
+            status: 'needs_search', candidates: [],
+            preferred_date: updated.draft.preferred_date,
+          })
         }
       }
       return { output }
@@ -814,12 +796,31 @@ export class MerchantCoordinator {
     if (toolName === 'search_availability') {
       const current = await this.toolClient.getBookingDraft(context)
       requireActiveTurn(context)
-      const result = await this.toolClient.searchAvailability(context, {
-        expected_availability_revision: current.draft.availability_revision,
-      })
-      const output = publicAvailability(result)
-      boundedMapSet(this.currentAvailability, sessionKey, output.search)
-      return { output }
+      try {
+        const result = await this.toolClient.searchAvailability(context, {
+          expected_availability_revision: current.draft.availability_revision,
+        })
+        const output = projectAvailabilityReceipt(current, result)
+        boundedMapSet(
+          this.currentAvailability,
+          sessionKey,
+          output.current_state.availability.belongs_to_current_draft
+            ? result.search
+            : {
+                status: 'needs_search', candidates: [],
+                preferred_date: current.draft.preferred_date,
+              },
+        )
+        return { output }
+      } catch (error) {
+        if (error?.code === 'booking_already_submitted') throw error
+        if ([409, 422].includes(error?.status)) {
+          return {
+            output: projectRejectedReceipt('search_availability', error, current),
+          }
+        }
+        throw error
+      }
     }
     if (toolName === 'prepare_booking') {
       const latest = this.currentAvailability.get(sessionKey)

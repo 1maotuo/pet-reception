@@ -398,7 +398,17 @@ test('same-turn read after a draft change re-queries current availability', asyn
     },
     searchAvailability: async () => {
       searchCalls += 1
-      return { search: { preferred_date: state.preferred_date, is_current: true } }
+      return {
+        search: {
+          draft_id: 'draft-id',
+          draft_version: state.version,
+          availability_revision: state.availability_revision,
+          preferred_date: state.preferred_date,
+          is_current: true,
+          status: 'available',
+          candidates: [],
+        },
+      }
     },
   }
   const coordinator = new MerchantCoordinator({ toolClient })
@@ -411,8 +421,8 @@ test('same-turn read after a draft change re-queries current availability', asyn
   )
   const second = await coordinator.runBusinessTool('search_availability', {}, context)
 
-  assert.equal(first.output.search.preferred_date, '2026-10-06')
-  assert.equal(second.output.search.preferred_date, '2026-10-07')
+  assert.equal(first.output.availability.preferred_date, '2026-10-06')
+  assert.equal(second.output.availability.preferred_date, '2026-10-07')
   assert.equal(searchCalls, 2)
 })
 
@@ -479,12 +489,11 @@ test('a saved draft remains truthful when the chained availability read fails', 
 
   assert.deepEqual(result.output.changed_fields, ['preferred_date'])
   assert.equal(result.output.draft.preferred_date, '2026-10-07')
-  assert.deepEqual(result.output.follow_up, {
-    status: 'availability_failed',
-    error_code: 'http_503',
-    retryable: true,
-    message: '预约资料已保存，但排班查询没有成功。',
-  })
+  assert.equal(result.output.status, 'partial_success')
+  assert.equal(result.output.effect.applied, true)
+  assert.equal(result.output.effect.availability_checked, false)
+  assert.equal(result.output.next_step.type, 'retry_availability')
+  assert.equal(JSON.stringify(result.output).includes('http_503'), false)
 })
 
 test('alternative-date results require a concrete re-query before prepare', async () => {
@@ -494,8 +503,12 @@ test('alternative-date results require a concrete re-query before prepare', asyn
       getBookingDraft: async () => ({ draft: draft() }),
       searchAvailability: async () => ({
         search: {
+          draft_id: 'draft-id',
+          draft_version: 2,
+          availability_revision: 1,
           status: 'no_availability',
           preferred_date: '2026-09-20',
+          is_current: true,
           candidates: [],
           alternative_dates: [{ date: '2026-09-22' }],
         },
@@ -508,7 +521,7 @@ test('alternative-date results require a concrete re-query before prepare', asyn
   })
 
   const searched = await coordinator.runBusinessTool('search_availability', {}, context)
-  assert.equal(searched.output.next_action.type, 'select_alternative_date')
+  assert.equal(searched.output.next_step.type, 'present_alternative_dates')
   const prepared = await coordinator.runBusinessTool(
     'prepare_booking',
     { candidate_id: 'invented-candidate' },
@@ -528,7 +541,11 @@ test('prepare accepts only a candidate from the current concrete search', async 
       getBookingDraft: async () => ({ draft: draft() }),
       searchAvailability: async () => ({
         search: {
+          draft_id: 'draft-id',
+          draft_version: 2,
+          availability_revision: 1,
           status: 'available',
+          is_current: true,
           preferred_date: '2026-10-06',
           candidates: [{ id: candidateId }],
           alternative_dates: [],
