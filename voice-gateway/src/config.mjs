@@ -73,9 +73,12 @@ export function configureEnvironment() {
   process.env.PET_RECEPTION_SILENCE_DURATION_MS = String(silenceDurationMs)
   process.env.PET_RECEPTION_VAD_THRESHOLD = String(vadThreshold)
   process.env.PET_RECEPTION_FRONTEND_TOOL_ALLOWLIST = [
-    'spawn_thinking',
-    'cancel_agent_task',
-    'get_agent_task_status',
+    'get_merchant_info',
+    'update_booking_draft',
+    'search_availability',
+    'prepare_booking',
+    'confirm_booking',
+    'get_booking_status',
   ].join(',')
   delete process.env.AGENT_PROTOCOL
 

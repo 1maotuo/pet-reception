@@ -7,12 +7,15 @@ import test from 'node:test'
 const require = createRequire(import.meta.url)
 const qwenRoot = dirname(require.resolve('qwen-audio-agent/package.json'))
 const allowedTools = [
-  'spawn_thinking',
-  'cancel_agent_task',
-  'get_agent_task_status',
+  'get_merchant_info',
+  'update_booking_draft',
+  'search_availability',
+  'prepare_booking',
+  'confirm_booking',
+  'get_booking_status',
 ]
 
-test('actual Qwen session exposes only bounded M1 tools with accurate descriptions', async () => {
+test('actual Qwen session exposes only the six bounded M4 business tools', async () => {
   process.env.PET_RECEPTION_FRONTEND_TOOL_ALLOWLIST = allowedTools.join(',')
   const providerModule = await import(pathToFileURL(resolve(
     qwenRoot,
@@ -31,9 +34,14 @@ test('actual Qwen session exposes only bounded M1 tools with accurate descriptio
     session.tools.map((tool) => tool.function.name),
     allowedTools,
   )
-  const spawn = session.tools.find((tool) => tool.function.name === 'spawn_thinking')
-  assert.match(spawn.function.description, /当前演示商家公开资料/)
-  assert.doesNotMatch(spawn.function.description, /搜索|文件|屏幕|应用|代码|图片生成/)
+  const update = session.tools.find((tool) => tool.function.name === 'update_booking_draft')
+  const confirm = session.tools.find((tool) => tool.function.name === 'confirm_booking')
+  assert.match(update.function.description, /一次批量写入/)
+  assert.equal(update.function.parameters.additionalProperties, false)
+  assert.equal(Object.hasOwn(update.function.parameters.properties, 'merchant_id'), false)
+  assert.equal(Object.hasOwn(update.function.parameters.properties, 'owner_id'), false)
+  assert.match(confirm.function.description, /新一轮明确确认/)
+  assert.doesNotMatch(session.tools.map((tool) => tool.function.name).join(','), /spawn_thinking|memory|notes|schedule/)
 })
 
 test('forced disabled tool calls are rejected before any side effect', async () => {
@@ -60,7 +68,7 @@ test('forced disabled tool calls are rejected before any side effect', async () 
     }),
     getTurnId: () => 'turn-a',
     getTurnGeneration: () => 0,
-    coordinator: {},
+    coordinator: { runBusinessTool: () => sideEffects.push('business') },
     memoryService: {
       append: () => sideEffects.push('memory'),
       replace: () => sideEffects.push('memory'),

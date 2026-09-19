@@ -1,15 +1,15 @@
 # Pet Reception
 
-面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库已实现 M3 确定性业务闭环：短时占位、受信确认门槛、待付款记录、本地模拟付款后正式确认、状态恢复，以及客户和商家从同一持久记录读取结果。M3 尚待用户阶段验收；实时模型要到 M4 才接入这些写工具。
+面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库已完成 M4 的实现与自动化/真实千问文字联调：同一个 Qwen Realtime Session 可读取商家、批量写草稿、查真实演示排班、准备并受控播报摘要、在下一轮明确确认后生成待付款记录，以及查询同一操作状态。真人麦克风、扬声器、停顿和打断仍需用户完成 C 层阶段验收；尚未进入 M5。
 
 ## 当前组件
 
 - `web/`：React 19 + TypeScript 7 + Vite 8 状态页与客户预约凭证页。
 - `backend/`：FastAPI 后端，提供健康检查、持久化商家/草稿、真实排班、短时占位、确认事务、状态恢复及客户/商家结果 API。
-- `voice-gateway/`：固定 `qwen-audio-agent@1.11.0`，复用其 WebUI、实时音频、播放、打断和重连机制；注入确定性的商家 HTTP 协调器，并通过版本守卫补丁配置同一套服务端 VAD、逻辑会话问候去重和 M1 工具许可集合。
+- `voice-gateway/`：固定 `qwen-audio-agent@1.11.0`，复用其 WebUI、实时音频、播放、打断和重连机制；注入确定性的受信业务 HTTP 协调器，并通过版本守卫补丁配置同一套服务端 VAD、逻辑会话问候去重、M4 六工具许可集合和播放完成回执。
 - `config/demo-merchant.json`：当前演示商家、前台角色、场景安全分流和能力开关的受信配置；后端和语音网关读取同一份商家来源。
 - `compose.yaml`：绑定本机回环地址的 PostgreSQL 17.11 开发服务。
-- `scripts/check-m3.ps1`：先跑全量数据库外回归，再在独立的 `*_test` PostgreSQL 数据库运行草稿、排班、占位、确认、并发、回滚和结果隔离测试。
+- `scripts/check-m4.ps1`：运行全量数据库外回归、独立 `*_test` PostgreSQL 测试、构建、运行服务健康检查，以及开发库真实 HTTP 工具闭环探针。
 
 ## 运行条件
 
@@ -45,7 +45,7 @@ backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.lock
 backend\.venv\Scripts\python.exe -m pip install -e backend --no-deps
 ```
 
-`npm ci` 会运行 `scripts/apply-qwen-m1-patch.mjs`。该脚本只接受锁定的 Qwen Audio Agent 1.11.0；版本不匹配会停止安装，避免对未知上游静默打补丁。
+`npm ci` 会运行历史文件名保留的 `scripts/apply-qwen-m1-patch.mjs`。它现在包含 M1–M4 所需的集中兼容钩子，只接受锁定的 Qwen Audio Agent 1.11.0；版本或源码锚点不匹配会停止安装，避免对未知上游静默打补丁。
 
 需要替换演示商家时，在本地 `.env` 同时设置匹配的 `DEMO_MERCHANT_ID` 和 `MERCHANT_CONFIG_PATH`，随后再次执行 `python -m pet_reception_backend.manage setup` 将配置 seed 到开发库。语音网关读取该受信文件，FastAPI 从 seed 后的 PostgreSQL 读取公开事实；文件内 ID 与环境变量不一致时启动失败，不会静默绑定到另一家商户。
 
@@ -95,10 +95,10 @@ npm run dev:voice
 .\scripts\check.ps1
 ```
 
-数据库运行后运行完整 M3 检查。脚本只创建/使用数据库名以 `_test` 结尾的独立测试库；M3 模块测试会重置该测试库中的临时业务记录，不清空开发库：
+数据库运行后运行完整 M4 检查。数据库测试只创建/使用名称以 `_test` 结尾的独立测试库；最后的运行中 HTTP 探针会在开发库创建一条明确标识的未来待付款演示记录，但不会打印任何密钥或访问 token：
 
 ```powershell
-.\scripts\check-m3.ps1
+.\scripts\check-m4.ps1
 ```
 
 检查 HTTP 状态：
@@ -112,6 +112,7 @@ Invoke-RestMethod http://127.0.0.1:3101/api/health
 
 ```powershell
 npm run probe:tool --workspace @pet-reception/voice-gateway
+npm run probe:m4 --workspace @pet-reception/voice-gateway
 ```
 
 ## M2 草稿与排班 API
@@ -154,11 +155,11 @@ Remove-Item Env:RUN_POSTGRES_TESTS
 .\scripts\probe-m2-availability.ps1
 ```
 
-演示种子中 Lisa 可做基础洗护和全套美容，Marco 只可做基础洗护；周日闭店。服务时长、前后缓冲和工作窗口均来自 PostgreSQL。当前 Qwen Session 仍只开放 M1 的只读商家资料工具；M2/M3 业务 API 已完成，但要到 M4 才接入实时模型，以便先为完整摘要、明确确认和打断时序建立受信协调规则，避免模型自行声称已经预约。
+演示种子中 Lisa 可做基础洗护和全套美容，Marco 只可做基础洗护；周日闭店。服务时长、前后缓冲和工作窗口均来自 PostgreSQL。M4 已将这些入口接入同一个 Qwen Realtime Session；商家、客户、会话、轮次及呈现/确认事件仍只由网关受信上下文提供。
 
 ## M3 占位、确认与预约结果
 
-M3 业务入口保持在确定性 HTTP 层，尚未暴露给实时模型：
+M3 业务入口保持在确定性 HTTP 层，并由 M4 的薄协调器暴露给同一个实时模型：
 
 - `POST /api/internal/voice/booking-preparations`：从当前受信草稿和真实候选生成服务端摘要快照，并短时占用人员的完整 busy interval。
 - `POST /api/internal/voice/booking-preparations/{id}/presented`：由受信协调层记录该快照已经完整呈现；呈现事件不来自模型正文。
@@ -176,21 +177,22 @@ M3 业务入口保持在确定性 HTTP 层，尚未暴露给实时模型：
 .\scripts\probe-m3-booking.ps1
 ```
 
-探针会输出预约 ID、参考号和付款后的确认编号，并验证确认前待付款、模拟付款后成功，以及状态、客户和商家读取都指向同一记录。该付款仅供本地验收，不连接真实支付平台；实时对话中的信息采集、摘要播报与确认语义属于 M4。
+探针会输出预约 ID、参考号和付款后的确认编号，并验证确认前待付款、模拟付款后成功，以及状态、客户和商家读取都指向同一记录。该付款仅供本地验收，不连接真实支付平台。
 
-## M1 真人语音检查
+## M4 真人语音检查
 
 1. 确认 `.env` 已配置真实 `DASHSCOPE_API_KEY`，启动后 `/api/health` 的 `voiceConfigured` 为 `true`。
 2. 打开 Qwen WebUI。无需先说话，应主动听到“Paws & Bubbles 宠物美容预约前台”的本店问候；允许麦克风后连续进行至少三轮中文对话。
 3. 问“你是谁、能帮我做什么”。应只描述当前店的服务咨询和预约准备，不能说能操作电脑、查新闻或充当通用助手。
 4. 说“我最近身体不舒服”和“我家狗狗不舒服，还能洗澡吗”。应分别给出合适的安全建议，然后带回当前美容店范围；不能承诺查找人类医院或做诊断。
-5. 询问“这家店有哪些服务？基础洗护多少钱？我想约明天下午”。模型应真实调用商家资料工具，保留“演示价格、起、实际需确认”，并明确当前不能查空档或创建预约。
-6. 描述宠物情况并问“你推荐做什么美容”。模型必须先查询商家资料；当前目录只有服务名称和价格，没有适用性与操作步骤，因此只能列出现有选项并说明需由商家确认，不能自行承诺某项能解决问题。
+5. 一句话给出客户姓名、电话、宠物名/种类/年龄、服务、日期和时段，并同时问价格。模型应保留演示价格限定，一次批量保存已有字段，然后给出 PostgreSQL 中的真实候选，不逐项重复询问。
+6. 选定候选后应听到服务端生成的完整摘要；摘要播完前不能出现预约成功。摘要中插话后，原播报应停止；若立刻说“确认”，系统应拒绝提交并从受控入口重新完整播报摘要。
 7. 慢慢说一个带口音或口语省略的请求，并在句中分别停顿约半秒、一秒和约一秒半。当前唯一轮次检测为 `server_vad`，噪声环境起始配置为声学阈值 0.65、结束等待 1800 ms；预期背景声不轻易触发，短暂停顿不抢答，实际听感记录为真人证据。
-8. 在助手播报时插话，确认播放及时停止，随后继续提问仍可回答；问候被打断时不应强行重播。
-9. 结束并新建会话，确认新连接会重新问候，旧会话工具结果不串入新会话。
+8. 摘要完整播完后，在新一轮说“确认，就按这个提交”。应只听到已生成 `BK-` 参考号并“等待本地模拟支付”；不能说正式确认，也不能出现 `PR-` 确认码。页面应另外显示“打开客户预约页面”的专属链接，助手不得朗读链接或 token。随后问状态，应返回同一参考号和待付款状态。
+9. 在提交播报期间插话，再问“刚才是不是已经约上了”。系统应查询原 `operation_id`，不再次提交；真实 DB 结果成功则报告同一记录，失败则如实报告。
+10. 结束并新建会话，确认新连接重新问候，旧会话草稿、候选、摘要和结果不串入新会话。
 
-当前模型只看到三个受控入口：只读商家资料查询、该查询的状态读取和取消。上游通用的记忆、清单、提醒、当前时间、权限回复等工具既不进入模型 Session，也会在被强制调用时由运行时拒绝。任何预约、空档或确认请求都必须如实说明尚未实现；不得生成预约编号。
+当前模型只看到六个受控入口：`get_merchant_info`、`update_booking_draft`、`search_availability`、`prepare_booking`、`confirm_booking`、`get_booking_status`。上游通用的后台 Agent、记忆、清单、提醒和权限工具既不进入模型 Session，也会在被强制调用时由运行时拒绝。`request_human_callback` 尚未实现，不会伪装成可用工具。
 
 停顿参数位于根目录被忽略的 `.env`：
 
@@ -209,6 +211,6 @@ VOICE_AUDIO_INPUT_LABEL=USB Audio Device
 
 ## 身份与密钥边界
 
-Qwen Gateway 使用签名的 HttpOnly 身份 Cookie。模型只能提交只读查询目标，不能提交授权用的 `merchant_id`、`owner_id`、`session_id` 或 `turn_id`。薄协调器从 Gateway 的服务端上下文读取这些值，以服务令牌调用 FastAPI；FastAPI 同时验证令牌和固定商家绑定。工具结果把完整可信事实（电话、地址、服务时长、价格限定与来源）放入模型结果正文，简短口播与页面卡片只是不同呈现，不能代替事实载荷。
+Qwen Gateway 使用签名的 HttpOnly 身份 Cookie。模型不能提交授权用的 `merchant_id`、`owner_id`、`session_id`、`turn_id`、呈现事件或确认事件。薄协调器从 Gateway 服务端上下文读取身份，以服务令牌调用 FastAPI；FastAPI 同时验证令牌和固定商家绑定。客户访问 token 与凭证 URL 不进入模型工具结果，只通过绑定到原 WebSocket 的页面卡片交付。摘要由服务端快照生成并走原版播放队列，只有浏览器回报完整播放结束且转写含关键摘要事实时才记录 `presented`；取消/打断播放不会放行确认。
 
 上游版本与扩展边界见 `docs/upstream/QWEN_AUDIO_AGENT.md`，本轮命令与结果见 `docs/evidence/M0_M1_2026-09-19.md`。

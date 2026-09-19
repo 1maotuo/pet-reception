@@ -59,6 +59,38 @@ test('applies the guarded M1 greeting and server VAD compatibility hooks', () =>
   assert.match(audioInputBootstrap, /__petReceptionAudioInput/)
 })
 
+test('applies guarded M4 tool and playback presentation hooks', () => {
+  const tools = readFileSync(
+    resolve(qwenRoot, 'server', 'src', 'voice', 'frontend-tools.mjs'),
+    'utf8',
+  )
+  const handler = readFileSync(
+    resolve(qwenRoot, 'server', 'src', 'voice', 'tools', 'tool-call-handler.mjs'),
+    'utf8',
+  )
+  const gateway = readFileSync(
+    resolve(qwenRoot, 'server', 'src', 'voice', 'realtime-gateway.mjs'),
+    'utf8',
+  )
+  const responseContext = readFileSync(
+    resolve(qwenRoot, 'server', 'src', 'voice', 'response-context.mjs'),
+    'utf8',
+  )
+
+  assert.match(tools, /const PET_RECEPTION_BUSINESS_TOOLS = \[/)
+  assert.match(tools, /name: 'confirm_booking'/)
+  assert.match(handler, /async handlePetReceptionBusinessTool\(/)
+  assert.match(handler, /origin: 'booking-summary'|\s*'booking-summary'/)
+  assert.match(gateway, /coordinator\.markBookingPresented\(/)
+  assert.match(gateway, /sendClientEvent: event => send\(ws, event\)/)
+  assert.match(handler, /this\.sendClientEvent\(\{/)
+  assert.match(handler, /type: 'timeline\.inline'/)
+  assert.match(gateway, /context\.playbackStarted/)
+  assert.match(gateway, /context\.responseDone/)
+  assert.match(gateway, /context\.transcriptDone/)
+  assert.match(responseContext, /'bookingPresentation'/)
+})
+
 test('builds the Qwen session with the noisy-room server VAD profile', async () => {
   process.env.PET_RECEPTION_TURN_DETECTION_TYPE = 'server_vad'
   process.env.PET_RECEPTION_SILENCE_DURATION_MS = '1800'
