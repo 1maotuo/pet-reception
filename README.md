@@ -191,6 +191,7 @@ Remove-Item Env:RUN_POSTGRES_TESTS
 M3 业务入口保持在确定性 HTTP 层，并由 M4 的薄协调器暴露给同一个实时模型：
 
 - `POST /api/internal/voice/booking-preparations`：从当前受信草稿和真实候选生成服务端摘要快照，并短时占用人员的完整 busy interval。
+- `GET /api/internal/voice/booking-preparations/{id}`：网关重启后按受信商家、客户和业务会话恢复同一准备记录；不会据此伪造新的播放回执。
 - `POST /api/internal/voice/booking-preparations/{id}/presented`：由受信协调层记录该快照已经完整呈现；呈现事件不来自模型正文。
 - `POST /api/internal/voice/booking-preparations/{id}/confirm`：只接受期望草稿版本，并要求新的受信语音轮次与确认事件；正文中的 `confirmed=true` 会因额外字段被拒绝。
 - `GET /api/internal/voice/booking-operations/{operation_id}`：在超时、断线或响应丢失后核实同一操作，不重新创建预约。
@@ -207,6 +208,17 @@ M3 业务入口保持在确定性 HTTP 层，并由 M4 的薄协调器暴露给�
 ```
 
 探针会输出预约 ID、参考号和付款后的确认编号，并验证确认前待付款、模拟付款后成功，以及状态、客户和商家读取都指向同一记录。该付款仅供本地验收，不连接真实支付平台。
+
+确认响应丢失和网关重启恢复可在独立测试库上用真实本地 HTTP 验证。先在终端 1 启动测试库后端，再在终端 2 运行两个探针；这些命令不读取或清理开发库：
+
+```powershell
+# 终端 1（项目根目录）
+.\backend\.venv\Scripts\python.exe backend\tests\m4_fault_probe_server.py
+
+# 终端 2（voice-gateway 目录）
+npm run probe:m4-confirm-loss
+npm run probe:m4-restart
+```
 
 ## M4 真人语音检查
 
