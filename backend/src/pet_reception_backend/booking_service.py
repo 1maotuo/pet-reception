@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import Engine, and_, func, or_, select
 
+from .business_rules import validate_booking_fields
 from .models import (
     availability_candidates,
     availability_searches,
@@ -33,13 +34,25 @@ from .schemas import (
 )
 
 
+@dataclass(slots=True)
 class BookingAlreadySubmittedError(ValueError):
-    pass
+    booking_id: UUID
+    operation_id: UUID
+    status: str
+    customer_reference: str
+
+    def __str__(self) -> str:
+        return str(self.booking_id)
 
 
 @dataclass(slots=True)
 class BookingNeedsInputError(ValueError):
     missing_fields: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class BookingInvalidFieldsError(ValueError):
+    invalid_fields: dict[str, str]
 
 
 class CandidateUnavailableError(ValueError):
@@ -238,6 +251,8 @@ class BookingService:
             pet_species=row["pet_species"],
             pet_breed=row["pet_breed"],
             pet_age_years=row["pet_age_years"],
+            pet_age_months=row["pet_age_months"],
+            pet_age_text=row["pet_age_text"],
             pet_care_notes=row["pet_care_notes"],
             need_description=row["need_description"],
             starts_at=row["starts_at"].astimezone(zone),
@@ -251,6 +266,15 @@ class BookingService:
             payment_method=row["payment_method"],
             status=row["status"],
             created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _already_submitted(booking) -> BookingAlreadySubmittedError:
+        return BookingAlreadySubmittedError(
+            booking_id=booking["id"],
+            operation_id=booking["operation_id"],
+            status=booking["status"],
+            customer_reference=booking["customer_reference"],
         )
 
     @staticmethod
@@ -349,7 +373,17 @@ class BookingService:
             if draft is None:
                 raise CandidateUnavailableError("draft_not_found")
             if draft["booking_id"] is not None:
-                raise BookingAlreadySubmittedError(str(draft["booking_id"]))
+                booking = connection.execute(
+                    select(bookings)
+                    .where(bookings.c.id == draft["booking_id"])
+                    .with_for_update()
+                ).mappings().one()
+                booking = expire_unpaid_booking(connection, booking, self.now_provider())
+                draft = connection.execute(
+                    self._draft_statement(context).with_for_update()
+                ).mappings().one()
+                if draft["booking_id"] is not None:
+                    raise self._already_submitted(booking)
             if draft["version"] != expected_version:
                 raise BookingConfirmationConflictError("draft_version_changed")
             required = (
@@ -430,6 +464,11 @@ class BookingService:
             ).mappings().one_or_none()
             if service is None or staff is None:
                 raise CandidateUnavailableError("catalog_changed")
+            invalid = validate_booking_fields(
+                dict(draft), list(service["supported_species"] or [])
+            )
+            if invalid:
+                raise BookingInvalidFieldsError(invalid_fields=invalid)
 
             now = self.now_provider()
             self._expire_merchant_payment_holds(
@@ -512,6 +551,8 @@ class BookingService:
                     if draft["pet_age_years"] is not None
                     else None
                 ),
+                pet_age_months=draft["pet_age_months"],
+                pet_age_text=draft["pet_age_text"],
                 pet_care_notes=draft["pet_care_notes"],
                 need_description=draft["need_description"],
             )
@@ -602,6 +643,20 @@ class BookingService:
                     or draft["pending_preparation_id"] != preparation_id
                 ):
                     raise BookingConfirmationConflictError("draft_version_changed")
+                service = connection.execute(
+                    select(merchant_services).where(
+                        merchant_services.c.merchant_id == context.merchant_id,
+                        merchant_services.c.id == draft["service_id"],
+                        merchant_services.c.active.is_(True),
+                    )
+                ).mappings().one_or_none()
+                if service is None:
+                    raise BookingConfirmationConflictError("catalog_changed")
+                invalid = validate_booking_fields(
+                    dict(draft), list(service["supported_species"] or [])
+                )
+                if invalid:
+                    raise BookingInvalidFieldsError(invalid_fields=invalid)
                 if preparation["status"] == "presented":
                     if preparation["presentation_id"] != presentation_id:
                         raise BookingConfirmationConflictError("different_presentation")
@@ -704,6 +759,20 @@ class BookingService:
                     or draft["pending_preparation_id"] != preparation_id
                 ):
                     raise BookingConfirmationConflictError("draft_version_changed")
+                service = connection.execute(
+                    select(merchant_services).where(
+                        merchant_services.c.merchant_id == context.merchant_id,
+                        merchant_services.c.id == draft["service_id"],
+                        merchant_services.c.active.is_(True),
+                    )
+                ).mappings().one_or_none()
+                if service is None:
+                    raise BookingConfirmationConflictError("catalog_changed")
+                invalid = validate_booking_fields(
+                    dict(draft), list(service["supported_species"] or [])
+                )
+                if invalid:
+                    raise BookingInvalidFieldsError(invalid_fields=invalid)
                 reused_event = connection.execute(
                     select(booking_preparations.c.id).where(
                         booking_preparations.c.merchant_id == context.merchant_id,
@@ -765,6 +834,8 @@ class BookingService:
                         pet_species=draft["pet_species"],
                         pet_breed=draft["pet_breed"],
                         pet_age_years=draft["pet_age_years"],
+                        pet_age_months=draft["pet_age_months"],
+                        pet_age_text=draft["pet_age_text"],
                         pet_care_notes=draft["pet_care_notes"],
                         need_description=draft["need_description"],
                         starts_at=preparation["starts_at"],

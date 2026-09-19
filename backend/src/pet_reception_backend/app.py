@@ -27,6 +27,7 @@ from .schemas import (
     MerchantBookingList,
     MarkPreparationPresentedRequest,
     PrepareBookingRequest,
+    StartBookingSessionRequest,
     SystemStatus,
     VoiceRequestContext,
 )
@@ -40,6 +41,7 @@ from .store import (
     BookingAlreadySubmittedError,
     BookingConfirmationConflictError,
     BookingCredentialError,
+    BookingInvalidFieldsError,
     BookingNeedsInputError,
     BookingPaymentConflictError,
     BookingPaymentExpiredError,
@@ -228,6 +230,21 @@ def create_app(
             missing_for_booking=missing_for_booking,
         )
 
+    def already_submitted_detail(error: BookingAlreadySubmittedError) -> dict:
+        return {
+            "code": "booking_already_submitted",
+            "message": "当前会话已有预约；可以查询原预约，开始另一笔请使用页面上的开始新预约。",
+            "booking_id": str(error.booking_id),
+            "operation_id": str(error.operation_id),
+            "booking_reference": error.customer_reference,
+            "status": error.status,
+            "recovery": {
+                "action": "use_start_new_booking_control",
+                "label": "开始新预约",
+                "gateway_path": "/api/pet-reception/booking-sessions",
+            },
+        }
+
     @application.get(
         "/api/internal/voice/merchant-info",
         response_model=MerchantToolResult,
@@ -259,6 +276,29 @@ def create_app(
             draft = current_store.get_or_create_draft(context)
         except MerchantNotFoundError as error:
             raise HTTPException(status_code=404, detail="merchant not found") from error
+        return draft_result(draft, context)
+
+    @application.post(
+        "/api/internal/voice/booking-sessions/start",
+        response_model=BookingDraftToolResult,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def start_booking_session(
+        request: StartBookingSessionRequest,
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> BookingDraftToolResult:
+        try:
+            draft = current_store.start_booking_session(
+                context, request.previous_voice_session_id
+            )
+        except MerchantNotFoundError as error:
+            raise HTTPException(status_code=404, detail="merchant not found") from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "booking_session_start_conflict", "message": str(error)},
+            ) from error
         return draft_result(draft, context)
 
     @application.patch(
@@ -302,7 +342,7 @@ def create_app(
         except BookingAlreadySubmittedError as error:
             raise HTTPException(
                 status_code=409,
-                detail={"code": "booking_already_submitted", "booking_id": str(error)},
+                detail=already_submitted_detail(error),
             ) from error
         except MerchantNotFoundError as error:
             raise HTTPException(status_code=404, detail="merchant not found") from error
@@ -355,6 +395,11 @@ def create_app(
                     "merchant_today": error.merchant_today.isoformat(),
                 },
             ) from error
+        except BookingAlreadySubmittedError as error:
+            raise HTTPException(
+                status_code=409,
+                detail=already_submitted_detail(error),
+            ) from error
         except (UnknownServiceError, UnknownStaffError) as error:
             raise HTTPException(
                 status_code=422,
@@ -387,6 +432,14 @@ def create_app(
                 status_code=422,
                 detail={"code": "needs_input", "missing_fields": list(error.missing_fields)},
             ) from error
+        if isinstance(error, BookingInvalidFieldsError):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "invalid_booking_fields",
+                    "invalid_fields": error.invalid_fields,
+                },
+            ) from error
         if isinstance(error, BookingPreparationNotFoundError):
             raise HTTPException(status_code=404, detail="booking operation not found") from error
         if isinstance(error, BookingPreparationExpiredError):
@@ -402,7 +455,7 @@ def create_app(
         if isinstance(error, BookingAlreadySubmittedError):
             raise HTTPException(
                 status_code=409,
-                detail={"code": "booking_already_submitted", "booking_id": str(error)},
+                detail=already_submitted_detail(error),
             ) from error
         if isinstance(error, CandidateUnavailableError):
             raise HTTPException(
@@ -420,6 +473,7 @@ def create_app(
 
     booking_errors = (
         BookingNeedsInputError,
+        BookingInvalidFieldsError,
         BookingPreparationNotFoundError,
         BookingPreparationExpiredError,
         BookingPreparationNotPresentedError,

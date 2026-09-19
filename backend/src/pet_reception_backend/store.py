@@ -21,6 +21,7 @@ from .booking_service import (
     BookingAlreadySubmittedError,
     BookingConfirmationConflictError,
     BookingCredentialError,
+    BookingInvalidFieldsError,
     BookingNeedsInputError,
     BookingPaymentConflictError,
     BookingPaymentExpiredError,
@@ -125,6 +126,12 @@ class DataStore(Protocol):
     def get_merchant(self, merchant_id: str) -> DemoMerchant | None: ...
 
     def get_or_create_draft(self, context: VoiceRequestContext) -> BookingDraft: ...
+
+    def start_booking_session(
+        self,
+        context: VoiceRequestContext,
+        previous_voice_session_id: str | None,
+    ) -> BookingDraft: ...
 
     def update_draft(
         self,
@@ -661,6 +668,33 @@ class PostgresStore:
                     row = self._select_draft(connection, context)
         return BookingDraft.model_validate(dict(row))
 
+    def start_booking_session(
+        self,
+        context: VoiceRequestContext,
+        previous_voice_session_id: str | None,
+    ) -> BookingDraft:
+        """Create a blank draft under a gateway-issued session without touching the old one."""
+        if previous_voice_session_id == context.voice_session_id:
+            raise ValueError("new voice session must differ from the previous session")
+        with self.engine.begin() as connection:
+            self._lock_merchant(connection, context.merchant_id)
+            if previous_voice_session_id:
+                connection.execute(
+                    select(booking_drafts.c.id).where(
+                        booking_drafts.c.merchant_id == context.merchant_id,
+                        booking_drafts.c.owner_id == context.owner_id,
+                        booking_drafts.c.voice_session_id == previous_voice_session_id,
+                    )
+                ).scalar_one_or_none()
+            self._ensure_draft(connection, context)
+            row = self._select_draft(connection, context, for_update=True)
+            if row["version"] != 0 or any(
+                row[field] is not None
+                for field in (*DRAFT_MUTABLE_FIELDS, "booking_id", "pending_preparation_id")
+            ):
+                raise ValueError("new voice session is already in use")
+        return BookingDraft.model_validate(dict(row))
+
     def update_draft(
         self,
         context: VoiceRequestContext,
@@ -685,7 +719,10 @@ class PostgresStore:
                     )
                     current = self._select_draft(connection, context, for_update=True)
             if current["booking_id"] is not None:
-                raise BookingAlreadySubmittedError(str(current["booking_id"]))
+                booking = connection.execute(
+                    select(bookings).where(bookings.c.id == current["booking_id"])
+                ).mappings().one()
+                raise self.booking_service._already_submitted(booking)
             if current["version"] != expected_version:
                 raise DraftVersionConflictError(current_version=current["version"])
 
@@ -846,8 +883,22 @@ class PostgresStore:
         list[OccupiedInterval],
     ]:
         with self.engine.begin() as connection:
+            self._lock_merchant(connection, context.merchant_id)
             self._ensure_draft(connection, context)
-            draft = dict(self._select_draft(connection, context))
+            draft_row = self._select_draft(connection, context, for_update=True)
+            if draft_row["booking_id"] is not None:
+                booking = connection.execute(
+                    select(bookings)
+                    .where(bookings.c.id == draft_row["booking_id"])
+                    .with_for_update()
+                ).mappings().one()
+                booking = expire_unpaid_booking(
+                    connection, booking, self.now_provider(ZoneInfo("UTC"))
+                )
+                draft_row = self._select_draft(connection, context, for_update=True)
+                if draft_row["booking_id"] is not None:
+                    raise self.booking_service._already_submitted(booking)
+            draft = dict(draft_row)
             if draft["availability_revision"] != expected_availability_revision:
                 raise AvailabilityRevisionConflictError(
                     current_revision=draft["availability_revision"]
@@ -995,6 +1046,18 @@ class PostgresStore:
         with self.engine.begin() as connection:
             self._lock_merchant(connection, context.merchant_id)
             current = self._select_draft(connection, context, for_update=True)
+            if current["booking_id"] is not None:
+                booking = connection.execute(
+                    select(bookings)
+                    .where(bookings.c.id == current["booking_id"])
+                    .with_for_update()
+                ).mappings().one()
+                booking = expire_unpaid_booking(
+                    connection, booking, self.now_provider(ZoneInfo("UTC"))
+                )
+                current = self._select_draft(connection, context, for_update=True)
+                if current["booking_id"] is not None:
+                    raise self.booking_service._already_submitted(booking)
             if current["availability_revision"] != expected_availability_revision:
                 raise AvailabilityRevisionConflictError(
                     current_revision=current["availability_revision"]

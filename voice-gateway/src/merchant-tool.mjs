@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 const TRUSTED_ID = /^[A-Za-z0-9._:-]{1,128}$/
 const DRAFT_FIELDS = new Set([
   'customer_name', 'contact_phone', 'pet_name', 'pet_species', 'pet_breed',
-  'pet_age_years', 'pet_care_notes', 'need_description', 'service_id',
+  'pet_age_years', 'pet_age_months', 'pet_age_text', 'pet_care_notes', 'need_description', 'service_id',
   'preferred_date', 'preferred_time_of_day', 'staff_preference_text', 'staff_id',
 ])
 const STATEFUL_TOOL_NAMES = new Set([
@@ -195,7 +195,11 @@ export class MerchantToolClient {
     let payload
     try {
       payload = await response.json()
-    } catch {
+    } catch (error) {
+      if (response.ok && method !== 'GET') {
+        throw new BusinessToolResultUnknownError(operation, error)
+      }
+      if (response.ok) throw error
       payload = null
     }
     if (!response.ok) {
@@ -204,6 +208,15 @@ export class MerchantToolClient {
         response.status,
         payload?.detail ?? payload,
       )
+    }
+    if (payload === null || typeof payload !== 'object') {
+      if (method !== 'GET') {
+        throw new BusinessToolResultUnknownError(
+          operation,
+          new Error('successful write response did not contain a JSON object'),
+        )
+      }
+      throw new Error(`${operation} returned an invalid JSON response`)
     }
     return payload
   }
@@ -219,6 +232,15 @@ export class MerchantToolClient {
     return this.request('/api/internal/voice/booking-draft', {
       context,
       operation: 'booking draft read',
+    })
+  }
+
+  startBookingSession(context, previousSessionId) {
+    return this.request('/api/internal/voice/booking-sessions/start', {
+      method: 'POST',
+      context,
+      body: { previous_voice_session_id: previousSessionId || null },
+      operation: 'booking session start',
     })
   }
 
@@ -414,9 +436,10 @@ function summarySpeech(summary) {
     hour: '2-digit', minute: '2-digit', hour12: false,
   }).format(new Date(summary.starts_at))
   const notes = [summary.pet_care_notes, summary.need_description].filter(Boolean).join('；')
+  const age = summary.pet_age_text ? `，年龄${summary.pet_age_text}` : ''
   return [
     '请您确认预约摘要。',
-    `${summary.customer_name}，为${summary.pet_species}${summary.pet_name}预约${summary.service_name_zh}，`,
+    `${summary.customer_name}，为${summary.pet_species}${summary.pet_name}${age}预约${summary.service_name_zh}，`,
     `${date}${time}，由${summary.staff_display_name}服务。`,
     `联系电话是${summary.contact_phone}。`,
     notes ? `备注：${notes}。` : '',
@@ -441,6 +464,52 @@ function normalizedTranscript(value) {
 
 function digitsOnly(value) {
   return replaceSpokenDigits(value).replace(/\D/g, '')
+}
+
+function parseChineseInteger(value) {
+  const source = String(value || '')
+  if (/^\d+$/.test(source)) return Number(source)
+  if (/^[零〇一二两三四五六七八九]+$/.test(source)) {
+    return Number(replaceSpokenDigits(source))
+  }
+  let total = 0
+  let current = 0
+  for (const character of source) {
+    if (Object.hasOwn(SPOKEN_DIGITS, character)) current = Number(SPOKEN_DIGITS[character])
+    else if (character === '十') { total += (current || 1) * 10; current = 0 }
+    else return Number.NaN
+  }
+  return total + current
+}
+
+function mentionedTimes(value) {
+  const source = String(value || '')
+  const times = new Set()
+  for (const match of source.matchAll(/(?:^|\D)([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)/g)) {
+    times.add(`${String(Number(match[1])).padStart(2, '0')}:${match[2]}`)
+  }
+  const spoken = /(上午|下午|晚上|中午|凌晨)?([0-9]{1,2}|[零〇一二两三四五六七八九十]+)(?:点|时)(半|([0-9]{1,2}|[零〇一二两三四五六七八九十]+)分?)?/g
+  for (const match of source.matchAll(spoken)) {
+    let hour = parseChineseInteger(match[2])
+    let minute = match[3] === '半' ? 30 : (match[4] ? parseChineseInteger(match[4]) : 0)
+    const period = match[1] || ''
+    if (!Number.isInteger(hour) || !Number.isInteger(minute) || minute > 59) continue
+    if (period === '凌晨' && hour === 12) hour = 0
+    if (period === '上午' && hour === 12) hour = 0
+    if (['下午', '晚上', '中午'].includes(period) && hour < 12) hour += 12
+    if (hour <= 23) times.add(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`)
+  }
+  return times
+}
+
+function mentionedPhones(value) {
+  const phones = new Set()
+  const pattern = /(?:联系电话|联系号码|电话号码|电话)(?:是|为|号码是|号码为|[:：])?\s*([+零〇一二两三四五六七八九0-9\s().-]{7,40})/g
+  for (const match of String(value || '').matchAll(pattern)) {
+    const digits = digitsOnly(match[1])
+    if (digits.length >= 7) phones.add(digits)
+  }
+  return phones
 }
 
 function chineseNumber(value) {
@@ -477,6 +546,7 @@ export function presentationTranscriptMatches(summary, transcript) {
   const required = [
     summary.customer_name, summary.pet_name, summary.pet_species,
     summary.service_name_zh, summary.staff_display_name,
+    summary.pet_age_text,
     summary.pet_care_notes, summary.need_description,
   ].map(normalizedTranscript).filter(Boolean)
   if (!required.every((value) => normalized.includes(value))) return false
@@ -487,17 +557,10 @@ export function presentationTranscriptMatches(summary, transcript) {
     `${year}年${month}月${day}日`,
     `${chineseYear}年${chineseNumber(month)}月${chineseNumber(day)}日`,
   ])
-  const paddedHour = String(hour).padStart(2, '0')
-  const paddedMinute = String(minute).padStart(2, '0')
-  const timeVariants = [
-    `${paddedHour}:${paddedMinute}`,
-    `${hour}点${minute ? `${minute}分` : ''}`,
-    `${chineseNumber(hour)}点${minute ? `${chineseNumber(minute)}分` : ''}`,
-  ]
-  if (minute === 30) timeVariants.push(`${hour}点半`, `${chineseNumber(hour)}点半`)
-  const timeMatches = includesAny(normalized, timeVariants)
+  const expectedTime = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+  const timeMatches = mentionedTimes(transcript).has(expectedTime)
   const expectedPhone = digitsOnly(summary.contact_phone)
-  const phoneMatches = expectedPhone.length >= 7 && digitsOnly(transcript).includes(expectedPhone)
+  const phoneMatches = expectedPhone.length >= 7 && mentionedPhones(transcript).has(expectedPhone)
 
   return dateMatches
     && timeMatches
@@ -514,6 +577,7 @@ export class MerchantCoordinator {
     this.presentations = new Map()
     this.presentationWrites = new Map()
     this.operations = new Map()
+    this.completedSessions = new Map()
   }
 
   async run(_input, options = {}) {
@@ -537,6 +601,17 @@ export class MerchantCoordinator {
       throw new Error(`unsupported pet reception business tool: ${toolName}`)
     }
     const context = coordinatorContext(options)
+    const sessionKey = `${context.ownerId}\u0000${context.sessionId}`
+    const completed = this.completedSessions.get(sessionKey)
+    if (completed && ['update_booking_draft', 'search_availability', 'prepare_booking'].includes(toolName)) {
+      return {
+        output: {
+          ...completed,
+          booking_status: completed.status,
+          status: 'already_submitted',
+        },
+      }
+    }
     const invocationKey = context.invocationId
       ? [context.ownerId, context.sessionId, context.invocationId, toolName].join('\u0000')
       : ''
@@ -569,6 +644,11 @@ export class MerchantCoordinator {
         boundedMapSet(this.completedMutations, invocationKey, result)
       }
       return result
+    } catch (error) {
+      if (error?.code === 'booking_already_submitted' && error?.detail?.status === 'confirmed') {
+        boundedMapSet(this.completedSessions, sessionKey, error.detail)
+      }
+      throw error
     } finally {
       if (this.inflightCalls.get(inflightKey) === pending) {
         this.inflightCalls.delete(inflightKey)
@@ -608,10 +688,21 @@ export class MerchantCoordinator {
           }
         } else {
           requireActiveTurn(context)
-          const availability = await this.toolClient.searchAvailability(context, {
-            expected_availability_revision: updated.draft.availability_revision,
-          })
-          output.availability = publicAvailability(availability).search
+          try {
+            const availability = await this.toolClient.searchAvailability(context, {
+              expected_availability_revision: updated.draft.availability_revision,
+            })
+            output.availability = publicAvailability(availability).search
+          } catch (error) {
+            if (error?.code === 'stale_business_turn') throw error
+            output.follow_up = {
+              status: 'availability_failed',
+              error_code: error?.code || 'availability_query_failed',
+              retryable: error?.code !== 'booking_already_submitted',
+              message: '预约资料已保存，但排班查询没有成功。',
+              ...(error?.detail ? { detail: error.detail } : {}),
+            }
+          }
         }
       }
       return { output }

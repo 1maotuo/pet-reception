@@ -232,3 +232,51 @@ test('a timed-out write is reported as result_unknown instead of definite failur
     await backend.close()
   }
 })
+
+test('write response timeout after HTTP 200 is still reported as result_unknown', async () => {
+  const backend = await listen((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.write('{"draft":')
+    setTimeout(() => response.end('{}'), 250)
+  })
+
+  try {
+    const client = new MerchantToolClient({
+      backendBaseUrl: backend.origin,
+      merchantId: 'demo-grooming-001',
+      serviceToken: 'test-service-token',
+      requestTimeoutMs: 25,
+    })
+    await assert.rejects(
+      client.updateBookingDraft({
+        ownerId: 'user_signed-owner', sessionId: 'session-a', turnId: 'turn-a',
+      }, { expected_version: 0, pet_name: '豆包' }),
+      { name: 'BusinessToolResultUnknownError', code: 'result_unknown' },
+    )
+  } finally {
+    await backend.close()
+  }
+})
+
+test('truncated successful write response is not treated as a successful null result', async () => {
+  const backend = await listen((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end('{"draft":')
+  })
+
+  try {
+    const client = new MerchantToolClient({
+      backendBaseUrl: backend.origin,
+      merchantId: 'demo-grooming-001',
+      serviceToken: 'test-service-token',
+    })
+    await assert.rejects(
+      client.updateBookingDraft({
+        ownerId: 'user_signed-owner', sessionId: 'session-a', turnId: 'turn-a',
+      }, { expected_version: 0, pet_name: '豆包' }),
+      { name: 'BusinessToolResultUnknownError', code: 'result_unknown' },
+    )
+  } finally {
+    await backend.close()
+  }
+})

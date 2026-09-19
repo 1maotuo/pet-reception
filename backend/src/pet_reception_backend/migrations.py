@@ -567,6 +567,33 @@ def add_m4_grooming_catalog(connection: Connection) -> None:
     )
 
 
+def add_m4_session_and_age_contract(connection: Connection) -> None:
+    """Preserve exact month-age wording without rewriting legacy approximate ages."""
+    connection.execute(
+        text(
+            "ALTER TABLE booking_drafts "
+            "ADD COLUMN IF NOT EXISTS pet_age_months INTEGER, "
+            "ADD COLUMN IF NOT EXISTS pet_age_text VARCHAR(80)"
+        )
+    )
+    connection.execute(
+        text(
+            "ALTER TABLE bookings "
+            "ADD COLUMN IF NOT EXISTS pet_age_months INTEGER, "
+            "ADD COLUMN IF NOT EXISTS pet_age_text VARCHAR(80)"
+        )
+    )
+    connection.execute(
+        text(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+            "WHERE conname = 'ck_booking_drafts_pet_age_months') THEN "
+            "ALTER TABLE booking_drafts ADD CONSTRAINT "
+            "ck_booking_drafts_pet_age_months CHECK (pet_age_months IS NULL OR "
+            "(pet_age_months >= 0 AND pet_age_months <= 600)); END IF; END $$"
+        )
+    )
+
+
 MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0001_m2_merchant_and_booking_drafts", create_m2_schema),
     ("0002_m2_staff_and_availability", add_m2_availability_schema),
@@ -575,6 +602,7 @@ MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0005_m3_booking", add_m3_booking_schema),
     ("0006_m3_simulated_payment", add_m3_simulated_payment),
     ("0007_m4_grooming_catalog", add_m4_grooming_catalog),
+    ("0008_m4_session_and_age_contract", add_m4_session_and_age_contract),
 )
 
 

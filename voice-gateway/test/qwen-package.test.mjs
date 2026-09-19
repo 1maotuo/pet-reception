@@ -31,6 +31,10 @@ test('applies the guarded M1 greeting and server VAD compatibility hooks', () =>
     'utf8',
   )
   const webIndex = readFileSync(resolve(qwenRoot, 'web', 'dist', 'index.html'), 'utf8')
+  const webBundle = readFileSync(
+    resolve(qwenRoot, 'web', 'dist', 'assets', 'index-D09JtNnt.js'),
+    'utf8',
+  )
   const audioInputBootstrap = readFileSync(
     resolve(qwenRoot, 'web', 'dist', 'pet-reception-audio-input.js'),
     'utf8',
@@ -50,6 +54,8 @@ test('applies the guarded M1 greeting and server VAD compatibility hooks', () =>
   assert.match(provider, /silence_duration_ms: silenceDurationMs/)
   assert.match(application, /preferredAudioInputLabel = ''/)
   assert.match(application, /selection: String\(preferredAudioInputLabel/)
+  assert.match(application, /installProductRoutes = null/)
+  assert.match(application, /installProductRoutes\(\{ app, identityManager \}\)/)
   assert.ok(
     webIndex.indexOf('pet-reception-audio-input.js')
       < webIndex.indexOf('assets/index-D09JtNnt.js'),
@@ -57,6 +63,8 @@ test('applies the guarded M1 greeting and server VAD compatibility hooks', () =>
   assert.match(audioInputBootstrap, /deviceId: \{ exact: match\.deviceId \}/)
   assert.match(audioInputBootstrap, /未找到配置的麦克风/)
   assert.match(audioInputBootstrap, /__petReceptionAudioInput/)
+  assert.match(webBundle, /fetch\("\/api\/pet-reception\/booking-sessions"/)
+  assert.match(webBundle, /children:"开始新预约"/)
 })
 
 test('applies guarded M4 tool and playback presentation hooks', () => {

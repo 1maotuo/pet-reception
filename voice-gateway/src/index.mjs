@@ -1,5 +1,6 @@
 import { configureEnvironment } from './config.mjs'
 import { createMerchantIntegration } from './merchant-tool.mjs'
+import { createBookingSessionRouteInstaller } from './session-routes.mjs'
 
 async function main() {
   const configuration = configureEnvironment()
@@ -10,6 +11,7 @@ async function main() {
     coordinator: integration.coordinator,
     initialGreeting: configuration.initialGreeting,
     preferredAudioInputLabel: configuration.preferredAudioInputLabel,
+    installProductRoutes: createBookingSessionRouteInstaller(integration),
     autoStart: false,
   })
 

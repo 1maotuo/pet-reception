@@ -136,6 +136,7 @@ export function applyQwenM1Patch(packageRoot) {
     },
     {
       label: 'gateway preferred audio input option',
+      alreadyApplied: `  preferredAudioInputLabel = '',`,
       original: `  initialGreeting = '',\n} = {}) {`,
       replacement: `  initialGreeting = '',\n  // Pet Reception M1 selects a configured physical microphone without replacing capture.\n  preferredAudioInputLabel = '',\n} = {}) {`,
     },
@@ -143,6 +144,18 @@ export function applyQwenM1Patch(packageRoot) {
       label: 'expose preferred audio input to the same-origin WebUI',
       original: `    realtimeInputSampleRate: realtime.inputSampleRate,`,
       replacement: `    realtimeInputSampleRate: realtime.inputSampleRate,\n    audioInput: {\n      selection: String(preferredAudioInputLabel || '').trim()\n        ? 'required-label'\n        : 'browser-default',\n      preferredLabel: String(preferredAudioInputLabel || '').trim() || null,\n    },`,
+    },
+    {
+      label: 'gateway product route installer option',
+      alreadyApplied: `  installProductRoutes = null,`,
+      original: `  preferredAudioInputLabel = '',\n} = {}) {`,
+      replacement: `  preferredAudioInputLabel = '',\n  // Product-specific same-origin routes are installed after trusted identity middleware.\n  installProductRoutes = null,\n} = {}) {`,
+    },
+    {
+      label: 'install product routes after trusted identity middleware',
+      alreadyApplied: `  installProductRoutes({ app, identityManager })`,
+      original: `app.use(express.json({ limit: '1mb' }))\n\nlet realtimeGateway`,
+      replacement: `app.use(express.json({ limit: '1mb' }))\n\nif (typeof installProductRoutes === 'function') {\n  installProductRoutes({ app, identityManager })\n}\n\nlet realtimeGateway`,
     },
   ])
 
@@ -325,7 +338,8 @@ export function frontendTools(agentContext = {}) {
   pet_name: { type: 'string', description: '宠物名字。' },
   pet_species: { type: 'string', description: '宠物种类，例如犬或猫。' },
   pet_breed: { type: 'string', description: '宠物品种；不确定时不要猜。' },
-  pet_age_years: { type: 'number', minimum: 0, maximum: 50, description: '宠物年龄（年）。' },
+  pet_age_years: { type: 'number', minimum: 0, maximum: 50, description: '仅兼容已经明确以年表示的年龄；不要把月龄换算为小数年。' },
+  pet_age_text: { type: 'string', description: '用户明确说出的年龄原文，例如“四个月”或“6岁”；优先用于幼宠月龄。' },
   pet_care_notes: { type: 'string', description: '护理注意事项，忠实保留用户说法，不作医疗推断。' },
   need_description: { type: 'string', description: '本次服务需求描述。' },
   service_id: { type: 'string', description: '只能使用 get_merchant_info 返回的服务 ID。' },
@@ -333,7 +347,7 @@ export function frontendTools(agentContext = {}) {
   preferred_time_of_day: { type: 'string', enum: ['morning', 'afternoon', 'evening', 'flexible'], description: '上午、下午、晚上或时间灵活。' },
   staff_preference_text: { type: 'string', description: '用户原话中的员工偏好。' },
   staff_id: { type: 'string', description: '只能使用 get_merchant_info 返回的员工 ID。' },
-  clear_fields: { type: 'array', items: { type: 'string', enum: ['customer_name', 'contact_phone', 'pet_name', 'pet_species', 'pet_breed', 'pet_age_years', 'pet_care_notes', 'need_description', 'service_id', 'preferred_date', 'preferred_time_of_day', 'staff_preference_text', 'staff_id'] }, uniqueItems: true, description: '仅在用户明确撤销或纠正字段时使用。' },
+  clear_fields: { type: 'array', items: { type: 'string', enum: ['customer_name', 'contact_phone', 'pet_name', 'pet_species', 'pet_breed', 'pet_age_years', 'pet_age_text', 'pet_care_notes', 'need_description', 'service_id', 'preferred_date', 'preferred_time_of_day', 'staff_preference_text', 'staff_id'] }, uniqueItems: true, description: '仅在用户明确撤销或纠正字段时使用。' },
   search_availability_after_update: { type: 'boolean', description: '仅当用户在本轮明确要求查询时间时设为 true；网关将在批量更新成功后立即查询，避免额外等待轮次。' },
 }
 
@@ -601,6 +615,10 @@ function mergeInputParts(...groups) {`,
           ? '预约摘要尚未完整播报，正在从受控入口重新播报。'
           : error?.code === 'result_unknown'
             ? '操作结果尚未核实；请查询同一个预约操作状态，不要重复提交。'
+          : detail?.code === 'booking_already_submitted'
+            ? '当前会话已有一笔预约。可以按返回的操作号查询原预约；如需另约，请使用页面上的“开始新预约”，不要重试准备或声称已清空。'
+          : detail?.code === 'invalid_booking_fields'
+            ? '预约资料没有通过校验；请只更正返回的字段，未成功写入的内容不能说已记录。'
           : detail?.code === 'expired'
             ? '本次占位已过期，需要重新查询时间。'
             : '这项预约操作暂时没有成功，请根据返回状态继续处理。',
@@ -947,6 +965,18 @@ export function ensureResponseContext(contexts, id, fallback = {}) {`,
       alreadyApplied: `q.jsx("p",{children:"PET RECEPTION"})`,
       original: `q.jsx("p",{children:"VOICE FRONTEND"})`,
       replacement: `q.jsx("p",{children:"PET RECEPTION"})`,
+    },
+    {
+      label: 'trusted start-new-booking control',
+      alreadyApplied: `fetch("/api/pet-reception/booking-sessions"`,
+      original: `$i=()=>{St.current.forEach(O=>clearTimeout(O)),St.current.clear();const A=crypto.randomUUID();localStorage.setItem("qwen-audio-agent.session",A),a(A),p([]),te([]),Fe.current="",gt.current="",qt.current.clear(),Ot.current.clear(),h(L("已创建新会话"))}`,
+      replacement: `$i=async()=>{if(window.__petReceptionStartingBooking)return;window.__petReceptionStartingBooking=!0;try{const O=await fetch("/api/pet-reception/booking-sessions",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({previous_session_id:n})}),ae=await O.json().catch(()=>({}));if(!O.ok||!ae.session_id)throw new Error(ae.message||"开始新预约失败");St.current.forEach(he=>clearTimeout(he)),St.current.clear();const A=ae.session_id;localStorage.setItem("qwen-audio-agent.session",A),a(A),p([]),te([]),Fe.current="",gt.current="",qt.current.clear(),Ot.current.clear(),h("已开始新预约")}catch(O){h("没有开始新预约："+(O?.message||String(O)))}finally{window.__petReceptionStartingBooking=!1}}`,
+    },
+    {
+      label: 'start-new-booking button label',
+      alreadyApplied: `onClick:$i,children:"开始新预约"`,
+      original: `onClick:$i,children:L("新会话")`,
+      replacement: `onClick:$i,children:"开始新预约"`,
     },
   ])
   writeFileSync(

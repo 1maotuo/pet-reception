@@ -163,6 +163,8 @@ booking_drafts = Table(
     Column("pet_species", String(80)),
     Column("pet_breed", String(200)),
     Column("pet_age_years", Numeric(4, 1)),
+    Column("pet_age_months", Integer),
+    Column("pet_age_text", String(80)),
     Column("pet_care_notes", Text),
     Column("need_description", Text),
     Column("service_id", String(128)),
@@ -237,6 +239,10 @@ booking_drafts = Table(
     CheckConstraint(
         "pet_age_years IS NULL OR (pet_age_years >= 0 AND pet_age_years <= 50)",
         name="ck_booking_drafts_pet_age",
+    ),
+    CheckConstraint(
+        "pet_age_months IS NULL OR (pet_age_months >= 0 AND pet_age_months <= 600)",
+        name="ck_booking_drafts_pet_age_months",
     ),
 )
 
@@ -406,6 +412,8 @@ bookings = Table(
     Column("pet_species", String(80), nullable=False),
     Column("pet_breed", String(200)),
     Column("pet_age_years", Numeric(4, 1)),
+    Column("pet_age_months", Integer),
+    Column("pet_age_text", String(80)),
     Column("pet_care_notes", Text),
     Column("need_description", Text),
     Column("starts_at", DateTime(timezone=True), nullable=False),

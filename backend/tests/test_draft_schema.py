@@ -14,6 +14,8 @@ from pet_reception_backend.schemas import AvailabilitySearchRequest, BookingDraf
         {"expected_version": 0, "contact_phone": "incoming_phone"},
         {"expected_version": 0, "contact_phone": "当前电话"},
         {"expected_version": 0, "contact_phone": "123"},
+        {"expected_version": 0, "contact_phone": "1234567abc"},
+        {"expected_version": 0, "contact_phone": "incoming_phone_13800000000"},
         {
             "expected_version": 0,
             "pet_name": "皮皮",
@@ -49,6 +51,38 @@ def test_draft_patch_accepts_a_real_explicit_phone_number() -> None:
     )
 
     assert patch.changes() == {"contact_phone": "+1 (415) 555-0188"}
+
+
+@pytest.mark.parametrize(
+    "expression,months,years",
+    [
+        ("四个月", 4, None),
+        ("4个月大", 4, None),
+        ("6岁", None, 6),
+    ],
+)
+def test_draft_patch_preserves_numeric_age_with_its_unit(
+    expression: str,
+    months: int | None,
+    years: int | None,
+) -> None:
+    patch = BookingDraftPatch.model_validate(
+        {"expected_version": 0, "pet_age_text": expression}
+    )
+
+    assert patch.changes() == {
+        "pet_age_text": expression,
+        "pet_age_months": months,
+        "pet_age_years": years,
+    }
+
+
+def test_draft_patch_accepts_breed_word_when_user_explicitly_uses_it_as_name() -> None:
+    patch = BookingDraftPatch.model_validate(
+        {"expected_version": 0, "pet_name": "金毛", "pet_species": "狗狗"}
+    )
+
+    assert patch.changes() == {"pet_name": "金毛", "pet_species": "犬"}
 
 
 @pytest.mark.parametrize(

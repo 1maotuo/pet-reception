@@ -424,7 +424,12 @@ def test_confirmation_gate_idempotency_and_same_record_views(environment) -> Non
         },
     )
     assert immutable.status_code == 409
-    assert immutable.json()["detail"]["code"] == "booking_already_submitted"
+    submitted_detail = immutable.json()["detail"]
+    assert submitted_detail["code"] == "booking_already_submitted"
+    assert submitted_detail["operation_id"] == confirmed["operation_id"]
+    assert submitted_detail["status"] == "confirmed"
+    assert submitted_detail["booking_reference"] == credential["booking_reference"]
+    assert submitted_detail["recovery"]["action"] == "use_start_new_booking_control"
 
     restarted_store = PostgresStore(
         store.engine,
@@ -446,6 +451,209 @@ def test_confirmation_gate_idempotency_and_same_record_views(environment) -> Non
         restarted_status.customer_credential.model_dump(mode="json")
         == confirmed["customer_credential"]
     )
+
+
+def test_paid_booking_can_start_a_second_trusted_session_without_reusing_old_draft(
+    environment,
+) -> None:
+    client, store, _ = environment
+    owner_id = f"owner_{uuid4().hex}"
+    first_headers = voice_headers(owner_id=owner_id)
+    first_headers, _, first_prepared = build_preparation(
+        client, next_tuesday(196), headers=first_headers, pet_name="第一只"
+    )
+    first_awaiting = confirm_prepared(client, first_headers, first_prepared)
+    first_credential = first_awaiting["customer_credential"]
+    first_paid = client.post(
+        f"/api/customer/bookings/{first_credential['booking_reference']}/simulate-payment",
+        headers={
+            "Authorization": f"Bearer {first_credential['access_token']}",
+            "X-Payment-Event-ID": f"payment_{uuid4().hex}",
+        },
+    )
+    assert first_paid.status_code == 200, first_paid.text
+    assert first_paid.json()["booking"]["status"] == "confirmed"
+
+    first_terminal = client.post(
+        "/api/internal/voice/availability-searches",
+        headers=with_turn(first_headers),
+        json={"expected_availability_revision": 1},
+    )
+    assert first_terminal.status_code == 409
+    terminal_detail = first_terminal.json()["detail"]
+    assert terminal_detail["operation_id"] == first_awaiting["operation_id"]
+    assert terminal_detail["status"] == "confirmed"
+
+    second_session_id = f"booking-{uuid4()}"
+    second_headers = voice_headers(owner_id=owner_id, session_id=second_session_id)
+    started = client.post(
+        "/api/internal/voice/booking-sessions/start",
+        headers=second_headers,
+        json={"previous_voice_session_id": first_headers["X-Voice-Session-ID"]},
+    )
+    assert started.status_code == 201, started.text
+    blank = started.json()["draft"]
+    assert blank["version"] == 0
+    assert blank["booking_id"] is None
+    assert blank["preferred_date"] is None
+
+    second_date = next_tuesday(210)
+    second_update = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=second_headers,
+        json={
+            "expected_version": 0,
+            "customer_name": "雷女士",
+            "contact_phone": "+86-138-3333-4444",
+            "pet_name": "金毛",
+            "pet_species": "狗狗",
+            "pet_age_text": "四个月",
+            "service_id": "demo-bath",
+            "preferred_date": second_date.isoformat(),
+            "preferred_time_of_day": "afternoon",
+            "staff_id": "demo-staff-lisa",
+        },
+    )
+    assert second_update.status_code == 200, second_update.text
+    second_draft = second_update.json()["draft"]
+    assert second_draft["pet_name"] == "金毛"
+    assert second_draft["pet_species"] == "犬"
+    assert second_draft["pet_age_text"] == "四个月"
+    assert second_draft["pet_age_months"] == 4
+    assert second_draft["pet_age_years"] is None
+
+    stale_old_request = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=with_turn(first_headers),
+        json={
+            "expected_version": first_prepared["preparation"]["draft_version"] + 1,
+            "customer_name": "不应进入新草稿",
+        },
+    )
+    assert stale_old_request.status_code == 409
+    reread_second = client.get(
+        "/api/internal/voice/booking-draft", headers=with_turn(second_headers)
+    ).json()["draft"]
+    assert reread_second["customer_name"] == "雷女士"
+
+    second_search = client.post(
+        "/api/internal/voice/availability-searches",
+        headers=second_headers,
+        json={
+            "expected_availability_revision": second_draft["availability_revision"]
+        },
+    )
+    assert second_search.status_code == 200, second_search.text
+    second_candidate = second_search.json()["search"]["candidates"][0]
+    second_prepared_response = client.post(
+        "/api/internal/voice/booking-preparations",
+        headers=second_headers,
+        json={
+            "expected_version": second_draft["version"],
+            "candidate_id": second_candidate["id"],
+        },
+    )
+    assert second_prepared_response.status_code == 200, second_prepared_response.text
+    second_prepared = second_prepared_response.json()
+    assert second_prepared["preparation"]["summary"]["pet_age_text"] == "四个月"
+    second_awaiting = confirm_prepared(client, second_headers, second_prepared)
+    assert second_awaiting["status"] == "awaiting_payment"
+
+    restarted = PostgresStore(
+        store.engine,
+        booking_credential_secret=CREDENTIAL_SECRET,
+    )
+    restored = restarted.get_booking_status(
+        VoiceRequestContext(
+            merchant_id=MERCHANT_ID,
+            owner_id=owner_id,
+            voice_session_id=second_session_id,
+            turn_id=f"turn_{uuid4().hex}",
+        ),
+        UUID(second_awaiting["operation_id"]),
+    )
+    assert restored.status == "awaiting_payment"
+
+    third_headers = voice_headers(
+        owner_id=owner_id, session_id=f"booking-{uuid4()}"
+    )
+    third_started = client.post(
+        "/api/internal/voice/booking-sessions/start",
+        headers=third_headers,
+        json={"previous_voice_session_id": second_session_id},
+    )
+    assert third_started.status_code == 201
+    third_update = client.patch(
+        "/api/internal/voice/booking-draft",
+        headers=third_headers,
+        json={
+            "expected_version": 0,
+            "service_id": "demo-bath",
+            "preferred_time_of_day": "afternoon",
+        },
+    )
+    assert third_update.status_code == 200
+    no_date = client.post(
+        "/api/internal/voice/availability-searches",
+        headers=third_headers,
+        json={
+            "expected_availability_revision": third_update.json()["draft"][
+                "availability_revision"
+            ]
+        },
+    )
+    assert no_date.status_code == 422
+    assert no_date.json()["detail"] == {
+        "code": "needs_input",
+        "missing_fields": ["preferred_date"],
+    }
+    assert third_update.json()["draft"]["preferred_date"] is None
+
+
+def test_prepare_and_confirm_revalidate_legacy_invalid_draft_fields(environment) -> None:
+    client, store, _ = environment
+    headers, draft, search = build_search(client, next_tuesday(224))
+    candidate = search["candidates"][0]
+    with store.engine.begin() as connection:
+        connection.execute(
+            booking_drafts.update()
+            .where(booking_drafts.c.id == UUID(draft["id"]))
+            .values(contact_phone="1234567abc", pet_species="猫")
+        )
+    rejected_prepare = client.post(
+        "/api/internal/voice/booking-preparations",
+        headers=headers,
+        json={
+            "expected_version": draft["version"],
+            "candidate_id": candidate["id"],
+        },
+    )
+    assert rejected_prepare.status_code == 422
+    assert rejected_prepare.json()["detail"] == {
+        "code": "invalid_booking_fields",
+        "invalid_fields": {
+            "contact_phone": "invalid_contact_phone",
+            "pet_species": "unsupported_for_service",
+        },
+    }
+
+    confirm_headers, _, prepared = build_preparation(client, next_tuesday(238))
+    mark_presented(client, confirm_headers, prepared)
+    with store.engine.begin() as connection:
+        connection.execute(
+            booking_drafts.update()
+            .where(
+                booking_drafts.c.id
+                == UUID(prepared["preparation"]["draft_id"])
+            )
+            .values(contact_phone="incoming_phone_13800000000")
+        )
+    rejected_confirm = confirm(client, confirm_headers, prepared)
+    assert rejected_confirm.status_code == 422
+    assert rejected_confirm.json()["detail"]["code"] == "invalid_booking_fields"
+    assert rejected_confirm.json()["detail"]["invalid_fields"] == {
+        "contact_phone": "invalid_contact_phone"
+    }
 
 
 def test_payment_expiry_releases_draft_and_rejects_late_payment(environment) -> None:

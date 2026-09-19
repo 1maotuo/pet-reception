@@ -6,6 +6,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .business_rules import (
+    normalize_contact_phone,
+    normalize_pet_species,
+    parse_pet_age_expression,
+    validate_pet_name,
+)
+
 
 class DatabaseStatus(BaseModel):
     status: Literal["connected", "unavailable", "not_configured"]
@@ -155,6 +162,8 @@ DraftFieldName = Literal[
     "pet_species",
     "pet_breed",
     "pet_age_years",
+    "pet_age_months",
+    "pet_age_text",
     "pet_care_notes",
     "need_description",
     "service_id",
@@ -171,6 +180,8 @@ DRAFT_MUTABLE_FIELDS: tuple[DraftFieldName, ...] = (
     "pet_species",
     "pet_breed",
     "pet_age_years",
+    "pet_age_months",
+    "pet_age_text",
     "pet_care_notes",
     "need_description",
     "service_id",
@@ -192,6 +203,8 @@ class BookingDraftPatch(BaseModel):
     pet_species: str | None = Field(default=None, max_length=80)
     pet_breed: str | None = Field(default=None, max_length=200)
     pet_age_years: Decimal | None = Field(default=None, ge=0, le=50, decimal_places=1)
+    pet_age_months: int | None = Field(default=None, ge=0, le=600)
+    pet_age_text: str | None = Field(default=None, max_length=80)
     pet_care_notes: str | None = Field(default=None, max_length=2000)
     need_description: str | None = Field(default=None, max_length=2000)
     service_id: str | None = Field(default=None, max_length=128)
@@ -211,6 +224,7 @@ class BookingDraftPatch(BaseModel):
         "pet_name",
         "pet_species",
         "pet_breed",
+        "pet_age_text",
         "pet_care_notes",
         "need_description",
         "service_id",
@@ -232,42 +246,26 @@ class BookingDraftPatch(BaseModel):
     def require_real_contact_phone(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        compact = value.casefold().replace(" ", "").replace("-", "")
-        forbidden = {
-            "incoming_phone",
-            "incomingphone",
-            "当前电话",
-            "来电号码",
-            "本机号码",
-            "现在这个",
-            "unknown",
-            "未知",
-        }
-        digits = "".join(character for character in value if character.isdigit())
-        if compact in forbidden or not 7 <= len(digits) <= 15:
-            raise ValueError(
-                "contact_phone must contain an actual user-provided phone number"
-            )
-        return value
+        return normalize_contact_phone(value)
 
     @field_validator("pet_name")
     @classmethod
     def reject_placeholder_pet_name(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        if value.casefold() in {
-            "未知",
-            "不详",
-            "不知道",
-            "未提供",
-            "未命名",
-            "暂无",
-            "unknown",
-            "unnamed",
-            "n/a",
-        }:
-            raise ValueError("pet_name must be the pet name explicitly provided by the user")
-        return value
+        return validate_pet_name(value)
+
+    @field_validator("pet_species")
+    @classmethod
+    def normalize_species_alias(cls, value: str | None) -> str | None:
+        return normalize_pet_species(value) if value is not None else None
+
+    @field_validator("pet_age_text")
+    @classmethod
+    def require_supported_age_expression(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return parse_pet_age_expression(value).display_text
 
     @model_validator(mode="after")
     def require_explicit_changes(self) -> "BookingDraftPatch":
@@ -282,12 +280,28 @@ class BookingDraftPatch(BaseModel):
             raise ValueError(f"fields cannot be set and cleared together: {fields}")
         if not provided and not self.clear_fields:
             raise ValueError("at least one draft field must be set or cleared")
+        age_inputs = provided.intersection({"pet_age_years", "pet_age_months", "pet_age_text"})
+        if len(age_inputs) > 1:
+            raise ValueError("provide pet age through only one age representation")
         return self
 
     def changes(self) -> dict[DraftFieldName, object]:
         provided = set(self.model_fields_set).intersection(DRAFT_MUTABLE_FIELDS)
         changes = {name: getattr(self, name) for name in provided}
         changes.update({name: None for name in self.clear_fields})
+        if "pet_age_text" in provided:
+            age = parse_pet_age_expression(self.pet_age_text or "")
+            changes.update(
+                pet_age_text=age.display_text,
+                pet_age_months=age.months,
+                pet_age_years=age.years,
+            )
+        elif "pet_age_months" in provided:
+            changes.update(pet_age_text=None, pet_age_years=None)
+        elif "pet_age_years" in provided:
+            changes.update(pet_age_text=None, pet_age_months=None)
+        if self.clear_fields.intersection({"pet_age_years", "pet_age_months", "pet_age_text"}):
+            changes.update(pet_age_text=None, pet_age_months=None, pet_age_years=None)
         return changes
 
 
@@ -306,6 +320,8 @@ class BookingDraft(BaseModel):
     pet_species: str | None
     pet_breed: str | None
     pet_age_years: Decimal | None
+    pet_age_months: int | None = None
+    pet_age_text: str | None = None
     pet_care_notes: str | None
     need_description: str | None
     service_id: str | None
@@ -331,6 +347,12 @@ class BookingDraftToolResult(BaseModel):
     changed_fields: list[DraftFieldName] = Field(default_factory=list)
     missing_for_availability: list[str]
     missing_for_booking: list[str]
+
+
+class StartBookingSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    previous_voice_session_id: str | None = Field(default=None, max_length=128)
 
 
 class AvailabilitySearchRequest(BaseModel):
@@ -426,6 +448,8 @@ class BookingSummary(BaseModel):
     pet_species: str
     pet_breed: str | None
     pet_age_years: Decimal | None
+    pet_age_months: int | None = None
+    pet_age_text: str | None = None
     pet_care_notes: str | None
     need_description: str | None
     source: Literal["server_booking_snapshot"] = "server_booking_snapshot"
@@ -468,6 +492,8 @@ class BookingRecord(BaseModel):
     pet_species: str
     pet_breed: str | None
     pet_age_years: Decimal | None
+    pet_age_months: int | None
+    pet_age_text: str | None
     pet_care_notes: str | None
     need_description: str | None
     starts_at: datetime

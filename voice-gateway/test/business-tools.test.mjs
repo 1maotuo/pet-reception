@@ -216,6 +216,35 @@ test('controlled summary requires a matching full playback transcript before pre
   assert.equal(writes[0][3], prepared.presentation.eventId)
 })
 
+test('controlled summary compares exact local time and exact phone instead of substrings', () => {
+  assert.equal(
+    presentationTranscriptMatches(summary(), completeSummaryTranscript().replace('09:00', '9:30')),
+    false,
+  )
+  assert.equal(
+    presentationTranscriptMatches(summary(), completeSummaryTranscript().replace('09:00', '19:00')),
+    false,
+  )
+  assert.equal(
+    presentationTranscriptMatches(summary(), completeSummaryTranscript().replace('09:00', '晚上九点')),
+    false,
+  )
+  assert.equal(
+    presentationTranscriptMatches(
+      { ...summary(), starts_at: '2026-10-06T13:00:00-07:00' },
+      completeSummaryTranscript().replace('09:00', '下午一点'),
+    ),
+    true,
+  )
+  assert.equal(
+    presentationTranscriptMatches(
+      summary(),
+      completeSummaryTranscript().replace('+86-138-0000-0000', '+86-138-0000-00001'),
+    ),
+    false,
+  )
+})
+
 test('confirmation waits for presentation persistence and hides customer credentials from the model', async () => {
   let releasePresentation
   const presentationPending = new Promise((resolve) => { releasePresentation = resolve })
@@ -357,6 +386,72 @@ test('draft update can continue directly to availability without a user nudge', 
     ['search', { expected_availability_revision: 2 }],
   ])
   assert.equal(result.output.availability.preferred_date, '2026-10-07')
+})
+
+test('a saved draft remains truthful when the chained availability read fails', async () => {
+  const toolClient = {
+    getBookingDraft: async () => ({ draft: draft() }),
+    updateBookingDraft: async () => ({
+      draft: draft({ version: 3, preferred_date: '2026-10-07' }),
+      changed_fields: ['preferred_date'],
+      missing_for_availability: [],
+      missing_for_booking: ['selected_availability'],
+    }),
+    searchAvailability: async () => {
+      const error = new Error('backend unavailable')
+      error.code = 'http_503'
+      error.status = 503
+      throw error
+    },
+  }
+
+  const result = await new MerchantCoordinator({ toolClient }).runBusinessTool(
+    'update_booking_draft',
+    { preferred_date: '2026-10-07', search_availability_after_update: true },
+    context,
+  )
+
+  assert.deepEqual(result.output.changed_fields, ['preferred_date'])
+  assert.equal(result.output.draft.preferred_date, '2026-10-07')
+  assert.deepEqual(result.output.follow_up, {
+    status: 'availability_failed',
+    error_code: 'http_503',
+    retryable: true,
+    message: '预约资料已保存，但排班查询没有成功。',
+  })
+})
+
+test('a confirmed draft failure blocks repeated prepare until a new session is used', async () => {
+  let draftReads = 0
+  const terminal = new Error('already submitted')
+  terminal.code = 'booking_already_submitted'
+  terminal.detail = {
+    code: 'booking_already_submitted',
+    status: 'confirmed',
+    operation_id: '11111111-1111-4111-8111-111111111111',
+    recovery: { action: 'use_start_new_booking_control' },
+  }
+  const coordinator = new MerchantCoordinator({
+    toolClient: {
+      getBookingDraft: async () => {
+        draftReads += 1
+        throw terminal
+      },
+    },
+  })
+
+  await assert.rejects(
+    coordinator.runBusinessTool('prepare_booking', { candidate_id: 'candidate' }, context),
+    { code: 'booking_already_submitted' },
+  )
+  const repeated = await coordinator.runBusinessTool(
+    'prepare_booking',
+    { candidate_id: 'candidate' },
+    { ...context, turnId: 'turn-b' },
+  )
+  assert.equal(repeated.output.status, 'already_submitted')
+  assert.equal(repeated.output.operation_id, terminal.detail.operation_id)
+  assert.equal(draftReads, 1)
 })
 
 test('an interrupted old mutation cannot overwrite a newer user turn', async () => {

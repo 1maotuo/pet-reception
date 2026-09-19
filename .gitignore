@@ -33,6 +33,7 @@ htmlcov/
 
 # Runtime logs and local captures
 logs/
+.runtime/
 *.log
 *.pid
 recordings/
