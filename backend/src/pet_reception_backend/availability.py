@@ -23,6 +23,13 @@ class CandidateWindow:
 
 
 @dataclass(frozen=True, slots=True)
+class OccupiedInterval:
+    staff_id: str
+    busy_starts_at: datetime
+    busy_ends_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class AlternativeDate:
     date: date
     first_start_at: datetime
@@ -89,10 +96,12 @@ def candidate_windows_for_date(
     windows: list[StaffWorkingWindow],
     limit: int,
     not_before: datetime | None = None,
+    occupied_intervals: list[OccupiedInterval] | None = None,
 ) -> list[CandidateWindow]:
     zone = ZoneInfo(merchant_time_zone)
     results: list[CandidateWindow] = []
     seen: set[tuple[str, datetime]] = set()
+    occupied = occupied_intervals or []
 
     for window in windows:
         if window.weekday != requested_date.weekday():
@@ -127,6 +136,13 @@ def candidate_windows_for_date(
                 continue
             if _utc(busy_start) < _utc(working_start) or _utc(busy_end) > _utc(
                 working_end
+            ):
+                continue
+            if any(
+                interval.staff_id == window.staff_id
+                and _utc(busy_start) < _utc(interval.busy_ends_at)
+                and _utc(interval.busy_starts_at) < _utc(busy_end)
+                for interval in occupied
             ):
                 continue
             key = (window.staff_id, service_start)
@@ -169,6 +185,7 @@ def find_alternative_dates(
     slot_interval_minutes: int,
     preferred_time_of_day: str | None,
     windows: list[StaffWorkingWindow],
+    occupied_intervals: list[OccupiedInterval] | None = None,
 ) -> list[AlternativeDate]:
     alternatives: list[AlternativeDate] = []
     for day_offset in range(1, alternative_days + 1):
@@ -183,6 +200,7 @@ def find_alternative_dates(
             preferred_time_of_day=preferred_time_of_day,
             windows=windows,
             limit=candidate_limit,
+            occupied_intervals=occupied_intervals,
         )
         if not candidates:
             continue

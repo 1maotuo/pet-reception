@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     test_database_url: str = ""
     database_connect_timeout_seconds: int = Field(default=2, ge=1, le=10)
     voice_gateway_service_token: str = ""
+    merchant_admin_token: str = ""
+    booking_credential_secret: str = ""
+    booking_hold_minutes: int = Field(default=5, ge=1, le=30)
     demo_merchant_id: str = "demo-grooming-001"
     merchant_config_path: str = "config/demo-merchant.json"
 

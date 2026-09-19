@@ -1,15 +1,15 @@
 # Pet Reception
 
-面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库已实现完整 M2：在已验收的 M0/M1 工程与语音接缝之上，加入 PostgreSQL 商家目录、会话预约草稿和真实美容人员排班查询。占位、正式预约和写入仍未实现。
+面向美国宠物医院、美容和日托商家的中文实时语音 AI 前台。当前仓库已实现 M3 确定性业务闭环：在已验收的 M0/M1 工程与语音接缝及 M2 商家/草稿/排班之上，加入短时占位、受信确认门槛、幂等预约事务、状态恢复，以及客户和商家从同一持久记录读取结果。M3 尚待用户阶段验收；实时模型要到 M4 才接入这些写工具。
 
 ## 当前组件
 
-- `web/`：React 19 + TypeScript 7 + Vite 8 状态页。
-- `backend/`：FastAPI 后端，提供健康检查、持久化商家/草稿，以及基于服务时长、缓冲、人员资格、每周工作窗口和商家时区的真实候选查询。
+- `web/`：React 19 + TypeScript 7 + Vite 8 状态页与客户预约凭证页。
+- `backend/`：FastAPI 后端，提供健康检查、持久化商家/草稿、真实排班、短时占位、确认事务、状态恢复及客户/商家结果 API。
 - `voice-gateway/`：固定 `qwen-audio-agent@1.11.0`，复用其 WebUI、实时音频、播放、打断和重连机制；注入确定性的商家 HTTP 协调器，并通过版本守卫补丁配置同一套服务端 VAD、逻辑会话问候去重和 M1 工具许可集合。
 - `config/demo-merchant.json`：当前演示商家、前台角色、场景安全分流和能力开关的受信配置；后端和语音网关读取同一份商家来源。
 - `compose.yaml`：绑定本机回环地址的 PostgreSQL 17.11 开发服务。
-- `scripts/check-m2.ps1`：先跑全量数据库外回归，再在独立的 `*_test` PostgreSQL 数据库运行草稿、排班、隔离和晚到查询测试。
+- `scripts/check-m3.ps1`：先跑全量数据库外回归，再在独立的 `*_test` PostgreSQL 数据库运行草稿、排班、占位、确认、并发、回滚和结果隔离测试。
 
 ## 运行条件
 
@@ -95,10 +95,10 @@ npm run dev:voice
 .\scripts\check.ps1
 ```
 
-数据库运行后运行完整 M2 检查。脚本只创建/使用数据库名以 `_test` 结尾的独立测试库，不清空开发库：
+数据库运行后运行完整 M3 检查。脚本只创建/使用数据库名以 `_test` 结尾的独立测试库；M3 模块测试会重置该测试库中的临时业务记录，不清空开发库：
 
 ```powershell
-.\scripts\check-m2.ps1
+.\scripts\check-m3.ps1
 ```
 
 检查 HTTP 状态：
@@ -154,7 +154,28 @@ Remove-Item Env:RUN_POSTGRES_TESTS
 .\scripts\probe-m2-availability.ps1
 ```
 
-演示种子中 Lisa 可做基础洗护和全套美容，Marco 只可做基础洗护；周日闭店。服务时长、前后缓冲和工作窗口均来自 PostgreSQL。当前 Qwen Session 仍只开放 M1 的只读商家资料工具；M2 业务 API 已完成，但要到 M4 才接入实时模型，避免在 M3 的占位和可信确认尚未完成时让模型假装已经预约。
+演示种子中 Lisa 可做基础洗护和全套美容，Marco 只可做基础洗护；周日闭店。服务时长、前后缓冲和工作窗口均来自 PostgreSQL。当前 Qwen Session 仍只开放 M1 的只读商家资料工具；M2/M3 业务 API 已完成，但要到 M4 才接入实时模型，以便先为完整摘要、明确确认和打断时序建立受信协调规则，避免模型自行声称已经预约。
+
+## M3 占位、确认与预约结果
+
+M3 业务入口保持在确定性 HTTP 层，尚未暴露给实时模型：
+
+- `POST /api/internal/voice/booking-preparations`：从当前受信草稿和真实候选生成服务端摘要快照，并短时占用人员的完整 busy interval。
+- `POST /api/internal/voice/booking-preparations/{id}/presented`：由受信协调层记录该快照已经完整呈现；呈现事件不来自模型正文。
+- `POST /api/internal/voice/booking-preparations/{id}/confirm`：只接受期望草稿版本，并要求新的受信语音轮次与确认事件；正文中的 `confirmed=true` 会因额外字段被拒绝。
+- `GET /api/internal/voice/booking-operations/{operation_id}`：在超时、断线或响应丢失后核实同一操作，不重新创建预约。
+- `GET /api/customer/bookings/{confirmation_code}`：使用预约专属 Bearer 凭证读取客户结果。
+- `GET /api/internal/merchant/bookings[/{id}]`：使用商家管理员令牌读取固定商家的同一预约记录。
+
+准备后任何客户资料或预约条件的实质变化都会撤销旧摘要/占位；占位过期也会释放。确认在 PostgreSQL 单事务中完成，重复确认返回原预约，人员区间冲突不会产生第二条预约。客户页面路径为凭证返回的 `/booking/{confirmation_code}#token=...`；token 位于 URL fragment，不会由浏览器作为普通 URL 请求发送，前端仅把它作为 Bearer 凭证调用后端，数据库只保存 token 哈希。
+
+后端正在运行时可执行真实开发库闭环探针。它会创建一条明确标记为 `M3 演示` 的未来预约，不打印服务令牌、管理员令牌或客户访问 token：
+
+```powershell
+.\scripts\probe-m3-booking.ps1
+```
+
+探针会输出预约 ID、确认编号，以及幂等重试、状态、客户和商家读取是否都指向同一记录。M3 不含支付；实时对话中的信息采集、摘要播报与确认语义属于 M4。
 
 ## M1 真人语音检查
 

@@ -16,9 +16,15 @@ from .schemas import (
     BookingDraftToolResult,
     AvailabilitySearchRequest,
     AvailabilityToolResult,
+    BookingOperationResult,
+    ConfirmBookingRequest,
+    CustomerBookingResult,
     DatabaseStatus,
     DraftFieldName,
     MerchantToolResult,
+    MerchantBookingList,
+    MarkPreparationPresentedRequest,
+    PrepareBookingRequest,
     SystemStatus,
     VoiceRequestContext,
 )
@@ -29,6 +35,14 @@ from .store import (
     AvailabilityRevisionConflictError,
     AvailabilityScheduleChangedError,
     AvailabilitySearchNotFoundError,
+    BookingAlreadySubmittedError,
+    BookingConfirmationConflictError,
+    BookingCredentialError,
+    BookingNeedsInputError,
+    BookingPreparationExpiredError,
+    BookingPreparationNotFoundError,
+    BookingPreparationNotPresentedError,
+    CandidateUnavailableError,
     DraftVersionConflictError,
     MerchantNotFoundError,
     PostgresStore,
@@ -68,7 +82,12 @@ def create_app(
         and isinstance(probe, DatabaseProbe)
         and resolved_settings.database_url
     ):
-        store = PostgresStore(probe.get_engine())
+        store = PostgresStore(
+            probe.get_engine(),
+            booking_hold_minutes=resolved_settings.booking_hold_minutes,
+            booking_credential_secret=resolved_settings.booking_credential_secret,
+            web_origin=resolved_settings.web_origin,
+        )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -77,7 +96,7 @@ def create_app(
 
     application = FastAPI(
         title="Pet Reception Backend",
-        version="0.3.1",
+        version="0.4.0",
         lifespan=lifespan,
     )
     application.add_middleware(
@@ -92,6 +111,8 @@ def create_app(
             "X-Voice-Owner-ID",
             "X-Voice-Session-ID",
             "X-Voice-Turn-ID",
+            "X-Presentation-Event-ID",
+            "X-Confirmation-Event-ID",
         ],
     )
 
@@ -149,6 +170,24 @@ def create_app(
             turn_id=x_voice_turn_id,
         )
 
+    def trusted_admin_merchant(
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+        x_merchant_id: str = Header(min_length=1, max_length=128),
+    ) -> str:
+        supplied_token = credentials.credentials if credentials else ""
+        if (
+            not resolved_settings.merchant_admin_token
+            or not supplied_token
+            or not compare_digest(
+                supplied_token,
+                resolved_settings.merchant_admin_token,
+            )
+        ):
+            raise HTTPException(status_code=401, detail="merchant authentication failed")
+        if x_merchant_id != resolved_settings.demo_merchant_id:
+            raise HTTPException(status_code=403, detail="merchant is not bound to this admin")
+        return x_merchant_id
+
     def draft_result(
         draft: BookingDraft,
         context: VoiceRequestContext,
@@ -173,7 +212,8 @@ def create_app(
             )
             if getattr(draft, field) is None
         ]
-        missing_for_booking.append("selected_availability")
+        if draft.selected_candidate_id is None:
+            missing_for_booking.append("selected_availability")
         return BookingDraftToolResult(
             draft=draft,
             context=context,
@@ -250,6 +290,11 @@ def create_app(
                 status_code=422,
                 detail={"code": "staff_not_qualified", "staff_id": str(error)},
             ) from error
+        except BookingAlreadySubmittedError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "booking_already_submitted", "booking_id": str(error)},
+            ) from error
         except MerchantNotFoundError as error:
             raise HTTPException(status_code=404, detail="merchant not found") from error
         return draft_result(draft, context, changed_fields)
@@ -322,6 +367,175 @@ def create_app(
         except MerchantNotFoundError as error:
             raise HTTPException(status_code=404, detail="merchant not found") from error
         return AvailabilityToolResult(search=result, context=context)
+
+    def booking_error(error: Exception) -> None:
+        if isinstance(error, BookingNeedsInputError):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "needs_input", "missing_fields": list(error.missing_fields)},
+            ) from error
+        if isinstance(error, BookingPreparationNotFoundError):
+            raise HTTPException(status_code=404, detail="booking operation not found") from error
+        if isinstance(error, BookingPreparationExpiredError):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "expired", "message": "重新查询空档并确认"},
+            ) from error
+        if isinstance(error, BookingPreparationNotPresentedError):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "confirmation_not_ready"},
+            ) from error
+        if isinstance(error, BookingAlreadySubmittedError):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "booking_already_submitted", "booking_id": str(error)},
+            ) from error
+        if isinstance(error, CandidateUnavailableError):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "unavailable", "reason": str(error)},
+            ) from error
+        if isinstance(error, BookingConfirmationConflictError):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "conflict", "reason": str(error)},
+            ) from error
+        if isinstance(error, RuntimeError):
+            raise HTTPException(status_code=503, detail="booking credential is not configured") from error
+        raise error
+
+    booking_errors = (
+        BookingNeedsInputError,
+        BookingPreparationNotFoundError,
+        BookingPreparationExpiredError,
+        BookingPreparationNotPresentedError,
+        BookingAlreadySubmittedError,
+        CandidateUnavailableError,
+        BookingConfirmationConflictError,
+        RuntimeError,
+    )
+
+    @application.post(
+        "/api/internal/voice/booking-preparations",
+        response_model=BookingOperationResult,
+    )
+    def prepare_booking(
+        request: PrepareBookingRequest,
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> BookingOperationResult:
+        try:
+            return current_store.prepare_booking(
+                context,
+                request.expected_version,
+                request.candidate_id,
+            )
+        except booking_errors as error:
+            booking_error(error)
+            raise AssertionError("unreachable")
+
+    @application.post(
+        "/api/internal/voice/booking-preparations/{preparation_id}/presented",
+        response_model=BookingOperationResult,
+    )
+    def mark_booking_preparation_presented(
+        preparation_id: UUID,
+        request: MarkPreparationPresentedRequest,
+        x_presentation_event_id: str = Header(min_length=8, max_length=128),
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> BookingOperationResult:
+        try:
+            return current_store.mark_booking_preparation_presented(
+                context,
+                preparation_id,
+                request.expected_draft_version,
+                x_presentation_event_id,
+            )
+        except booking_errors as error:
+            booking_error(error)
+            raise AssertionError("unreachable")
+
+    @application.post(
+        "/api/internal/voice/booking-preparations/{preparation_id}/confirm",
+        response_model=BookingOperationResult,
+    )
+    def confirm_booking(
+        preparation_id: UUID,
+        request: ConfirmBookingRequest,
+        x_confirmation_event_id: str = Header(min_length=8, max_length=128),
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> BookingOperationResult:
+        try:
+            return current_store.confirm_booking(
+                context,
+                preparation_id,
+                request.expected_draft_version,
+                x_confirmation_event_id,
+            )
+        except booking_errors as error:
+            booking_error(error)
+            raise AssertionError("unreachable")
+
+    @application.get(
+        "/api/internal/voice/booking-operations/{operation_id}",
+        response_model=BookingOperationResult,
+    )
+    def get_booking_status(
+        operation_id: UUID,
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> BookingOperationResult:
+        try:
+            return current_store.get_booking_status(context, operation_id)
+        except booking_errors as error:
+            booking_error(error)
+            raise AssertionError("unreachable")
+
+    @application.get(
+        "/api/customer/bookings/{confirmation_code}",
+        response_model=CustomerBookingResult,
+    )
+    def customer_booking(
+        confirmation_code: str,
+        credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+        current_store: DataStore = Depends(require_store),
+    ) -> CustomerBookingResult:
+        token = credentials.credentials if credentials else ""
+        try:
+            return CustomerBookingResult(
+                booking=current_store.get_customer_booking(confirmation_code, token)
+            )
+        except BookingCredentialError as error:
+            raise HTTPException(status_code=404, detail="booking not found") from error
+
+    @application.get(
+        "/api/internal/merchant/bookings",
+        response_model=MerchantBookingList,
+    )
+    def merchant_bookings(
+        merchant_id: str = Depends(trusted_admin_merchant),
+        current_store: DataStore = Depends(require_store),
+    ) -> MerchantBookingList:
+        return current_store.list_merchant_bookings(merchant_id)
+
+    @application.get(
+        "/api/internal/merchant/bookings/{booking_id}",
+        response_model=CustomerBookingResult,
+    )
+    def merchant_booking(
+        booking_id: UUID,
+        merchant_id: str = Depends(trusted_admin_merchant),
+        current_store: DataStore = Depends(require_store),
+    ) -> CustomerBookingResult:
+        try:
+            return CustomerBookingResult(
+                booking=current_store.get_merchant_booking(merchant_id, booking_id)
+            )
+        except BookingPreparationNotFoundError as error:
+            raise HTTPException(status_code=404, detail="booking not found") from error
 
     return application
 

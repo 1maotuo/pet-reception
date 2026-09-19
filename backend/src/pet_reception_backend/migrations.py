@@ -317,11 +317,171 @@ def add_m2_review_reconciliation(connection: Connection) -> None:
     )
 
 
+def add_m3_booking_schema(connection: Connection) -> None:
+    connection.execute(
+        text(
+            "ALTER TABLE booking_drafts "
+            "ADD COLUMN IF NOT EXISTS selected_candidate_id UUID, "
+            "ADD COLUMN IF NOT EXISTS pending_preparation_id UUID, "
+            "ADD COLUMN IF NOT EXISTS booking_id UUID"
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS booking_preparations (
+                id UUID PRIMARY KEY,
+                operation_id UUID NOT NULL UNIQUE,
+                draft_id UUID NOT NULL,
+                merchant_id VARCHAR(128) NOT NULL,
+                owner_id VARCHAR(128) NOT NULL,
+                voice_session_id VARCHAR(128) NOT NULL,
+                candidate_id UUID NOT NULL,
+                staff_id VARCHAR(128) NOT NULL,
+                service_id VARCHAR(128) NOT NULL,
+                draft_version INTEGER NOT NULL,
+                availability_revision INTEGER NOT NULL,
+                schedule_revision INTEGER NOT NULL,
+                starts_at TIMESTAMPTZ NOT NULL,
+                ends_at TIMESTAMPTZ NOT NULL,
+                busy_starts_at TIMESTAMPTZ NOT NULL,
+                busy_ends_at TIMESTAMPTZ NOT NULL,
+                merchant_time_zone VARCHAR(80) NOT NULL,
+                summary JSONB NOT NULL,
+                summary_digest VARCHAR(64) NOT NULL,
+                status VARCHAR(32) NOT NULL,
+                prepared_turn_id VARCHAR(128) NOT NULL,
+                presentation_id VARCHAR(128),
+                presented_at TIMESTAMPTZ,
+                confirmation_event_id VARCHAR(128),
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CONSTRAINT fk_booking_preparations_draft
+                    FOREIGN KEY (draft_id) REFERENCES booking_drafts (id)
+                    ON DELETE CASCADE,
+                CONSTRAINT fk_booking_preparations_candidate
+                    FOREIGN KEY (candidate_id) REFERENCES availability_candidates (id)
+                    ON DELETE RESTRICT,
+                CONSTRAINT fk_booking_preparations_staff
+                    FOREIGN KEY (merchant_id, staff_id)
+                    REFERENCES staff_members (merchant_id, id)
+                    ON DELETE RESTRICT,
+                CONSTRAINT fk_booking_preparations_service
+                    FOREIGN KEY (merchant_id, service_id)
+                    REFERENCES merchant_services (merchant_id, id)
+                    ON DELETE RESTRICT,
+                CONSTRAINT uq_booking_preparations_confirmation_event
+                    UNIQUE (merchant_id, confirmation_event_id),
+                CONSTRAINT ck_booking_preparations_status CHECK (
+                    status IN ('prepared', 'presented', 'confirmed', 'expired', 'cancelled')
+                )
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS bookings (
+                id UUID PRIMARY KEY,
+                preparation_id UUID NOT NULL UNIQUE,
+                operation_id UUID NOT NULL UNIQUE,
+                draft_id UUID NOT NULL,
+                merchant_id VARCHAR(128) NOT NULL,
+                owner_id VARCHAR(128) NOT NULL,
+                voice_session_id VARCHAR(128) NOT NULL,
+                candidate_id UUID NOT NULL,
+                staff_id VARCHAR(128) NOT NULL,
+                service_id VARCHAR(128) NOT NULL,
+                customer_name VARCHAR(200) NOT NULL,
+                contact_phone VARCHAR(40) NOT NULL,
+                pet_name VARCHAR(200) NOT NULL,
+                pet_species VARCHAR(80) NOT NULL,
+                pet_breed VARCHAR(200),
+                pet_age_years NUMERIC(4, 1),
+                pet_care_notes TEXT,
+                need_description TEXT,
+                starts_at TIMESTAMPTZ NOT NULL,
+                ends_at TIMESTAMPTZ NOT NULL,
+                busy_starts_at TIMESTAMPTZ NOT NULL,
+                busy_ends_at TIMESTAMPTZ NOT NULL,
+                merchant_time_zone VARCHAR(80) NOT NULL,
+                summary JSONB NOT NULL,
+                summary_digest VARCHAR(64) NOT NULL,
+                confirmation_event_id VARCHAR(128) NOT NULL,
+                confirmation_code VARCHAR(32) NOT NULL UNIQUE,
+                customer_access_token_hash VARCHAR(64) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'confirmed',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CONSTRAINT fk_bookings_preparation
+                    FOREIGN KEY (preparation_id) REFERENCES booking_preparations (id)
+                    ON DELETE RESTRICT,
+                CONSTRAINT fk_bookings_draft
+                    FOREIGN KEY (draft_id) REFERENCES booking_drafts (id)
+                    ON DELETE RESTRICT,
+                CONSTRAINT fk_bookings_candidate
+                    FOREIGN KEY (candidate_id) REFERENCES availability_candidates (id)
+                    ON DELETE RESTRICT,
+                CONSTRAINT fk_bookings_staff
+                    FOREIGN KEY (merchant_id, staff_id)
+                    REFERENCES staff_members (merchant_id, id)
+                    ON DELETE RESTRICT,
+                CONSTRAINT fk_bookings_service
+                    FOREIGN KEY (merchant_id, service_id)
+                    REFERENCES merchant_services (merchant_id, id)
+                    ON DELETE RESTRICT,
+                CONSTRAINT ck_bookings_status CHECK (status = 'confirmed')
+            )
+            """
+        )
+    )
+    for constraint_name, statement in (
+        (
+            "fk_booking_drafts_selected_candidate",
+            "ALTER TABLE booking_drafts ADD CONSTRAINT "
+            "fk_booking_drafts_selected_candidate FOREIGN KEY (selected_candidate_id) "
+            "REFERENCES availability_candidates (id) ON DELETE SET NULL",
+        ),
+        (
+            "fk_booking_drafts_pending_preparation",
+            "ALTER TABLE booking_drafts ADD CONSTRAINT "
+            "fk_booking_drafts_pending_preparation FOREIGN KEY (pending_preparation_id) "
+            "REFERENCES booking_preparations (id) ON DELETE SET NULL",
+        ),
+        (
+            "fk_booking_drafts_booking",
+            "ALTER TABLE booking_drafts ADD CONSTRAINT fk_booking_drafts_booking "
+            "FOREIGN KEY (booking_id) REFERENCES bookings (id) ON DELETE RESTRICT",
+        ),
+    ):
+        connection.execute(
+            text(
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint "
+                f"WHERE conname = '{constraint_name}') THEN "
+                f"{statement}; END IF; END $$"
+            )
+        )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_booking_preparations_active_staff "
+            "ON booking_preparations (merchant_id, staff_id, expires_at)"
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_bookings_merchant_created "
+            "ON bookings (merchant_id, created_at DESC)"
+        )
+    )
+
+
 MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0001_m2_merchant_and_booking_drafts", create_m2_schema),
     ("0002_m2_staff_and_availability", add_m2_availability_schema),
     ("0003_m2_schedule_revision", add_m2_schedule_revision),
     ("0004_m2_review_reconciliation", add_m2_review_reconciliation),
+    ("0005_m3_booking", add_m3_booking_schema),
 )
 
 

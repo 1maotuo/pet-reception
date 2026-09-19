@@ -64,8 +64,31 @@ h1 { margin: 0; font-size: clamp(2.6rem, 7vw, 5.8rem); line-height: 0.98; letter
 .actions button { border: 0; border-radius: 999px; padding: 11px 18px; color: white; background: #1f2b27; cursor: pointer; }
 .actions button:hover { background: #35463f; }
 
+.booking-shell { max-width: 820px; }
+.booking-title { font-size: clamp(2.4rem, 6vw, 4.6rem); }
+.booking-card {
+  margin-top: 44px;
+  overflow: hidden;
+  border: 1px solid rgba(31, 43, 39, 0.12);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 18px 60px rgba(45, 56, 52, 0.08);
+}
+.booking-code { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; padding: 24px 28px; color: white; background: #1f2b27; }
+.booking-code span { font-size: 0.8rem; font-weight: 750; letter-spacing: 0.08em; }
+.booking-code strong { font-size: 1.4rem; letter-spacing: 0.04em; }
+.booking-details { margin: 0; padding: 12px 28px 20px; }
+.booking-details div { display: grid; grid-template-columns: 120px 1fr; gap: 16px; padding: 17px 0; border-bottom: 1px solid rgba(31, 43, 39, 0.1); }
+.booking-details div:last-child { border-bottom: 0; }
+.booking-details dt { color: #6e7975; }
+.booking-details dd { margin: 0; font-weight: 680; line-height: 1.5; }
+.credential-note { color: #66716d; font-size: 0.88rem; line-height: 1.6; }
+.booking-error { margin-top: 28px; padding: 18px 20px; border-radius: 14px; color: #8c321f; background: #fce7df; }
+
 @media (max-width: 760px) {
   .shell { padding: 48px 0; }
   .status-grid { grid-template-columns: 1fr; }
   .actions { align-items: flex-start; flex-direction: column; }
+  .booking-code { align-items: flex-start; flex-direction: column; }
+  .booking-details div { grid-template-columns: 1fr; gap: 5px; }
 }

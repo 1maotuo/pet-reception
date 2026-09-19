@@ -12,14 +12,28 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from .availability import (
     CandidateWindow,
+    OccupiedInterval,
     StaffWorkingWindow,
     candidate_windows_for_date,
     find_alternative_dates,
+)
+from .booking_service import (
+    BookingAlreadySubmittedError,
+    BookingConfirmationConflictError,
+    BookingCredentialError,
+    BookingNeedsInputError,
+    BookingPreparationExpiredError,
+    BookingPreparationNotFoundError,
+    BookingPreparationNotPresentedError,
+    BookingService,
+    CandidateUnavailableError,
 )
 from .models import (
     availability_candidates,
     availability_searches,
     booking_drafts,
+    booking_preparations,
+    bookings,
     merchant_services,
     merchants,
     staff_members,
@@ -30,12 +44,15 @@ from .schemas import (
     AlternativeAvailabilityDate,
     AvailabilityCandidate,
     AvailabilitySearchResult,
+    BookingOperationResult,
+    BookingRecord,
     BookingDraft,
     DRAFT_MUTABLE_FIELDS,
     DemoMerchant,
     DraftFieldName,
     MerchantStaff,
     MerchantService,
+    MerchantBookingList,
     VoiceRequestContext,
 )
 
@@ -119,6 +136,43 @@ class DataStore(Protocol):
         search_id: UUID,
     ) -> AvailabilitySearchResult: ...
 
+    def prepare_booking(
+        self,
+        context: VoiceRequestContext,
+        expected_version: int,
+        candidate_id: UUID,
+    ) -> BookingOperationResult: ...
+
+    def mark_booking_preparation_presented(
+        self,
+        context: VoiceRequestContext,
+        preparation_id: UUID,
+        expected_draft_version: int,
+        presentation_id: str,
+    ) -> BookingOperationResult: ...
+
+    def confirm_booking(
+        self,
+        context: VoiceRequestContext,
+        preparation_id: UUID,
+        expected_draft_version: int,
+        confirmation_event_id: str,
+    ) -> BookingOperationResult: ...
+
+    def get_booking_status(
+        self, context: VoiceRequestContext, operation_id: UUID
+    ) -> BookingOperationResult: ...
+
+    def get_customer_booking(
+        self, confirmation_code: str, access_token: str
+    ) -> BookingRecord: ...
+
+    def list_merchant_bookings(self, merchant_id: str) -> MerchantBookingList: ...
+
+    def get_merchant_booking(
+        self, merchant_id: str, booking_id: UUID
+    ) -> BookingRecord: ...
+
 
 class PostgresStore:
     def __init__(
@@ -128,10 +182,20 @@ class PostgresStore:
             candidate_windows_for_date
         ),
         now_provider: Callable[[ZoneInfo], datetime] = datetime.now,
+        booking_hold_minutes: int = 5,
+        booking_credential_secret: str = "",
+        web_origin: str = "http://127.0.0.1:5173",
     ) -> None:
         self.engine = engine
         self.candidate_calculator = candidate_calculator
         self.now_provider = now_provider
+        self.booking_service = BookingService(
+            engine,
+            hold_minutes=booking_hold_minutes,
+            credential_secret=booking_credential_secret,
+            web_origin=web_origin,
+            now_provider=lambda: self.now_provider(ZoneInfo("UTC")),
+        )
 
     @staticmethod
     def _schedule_fingerprint(merchant: DemoMerchant) -> str | None:
@@ -446,6 +510,7 @@ class PostgresStore:
                 booking_drafts.update()
                 .where(
                     booking_drafts.c.merchant_id == merchant.id,
+                    booking_drafts.c.booking_id.is_(None),
                     or_(invalid_service, invalid_staff, invalid_qualification),
                 )
                 .values(
@@ -500,8 +565,41 @@ class PostgresStore:
 
     def get_or_create_draft(self, context: VoiceRequestContext) -> BookingDraft:
         with self.engine.begin() as connection:
+            connection.execute(
+                select(merchants.c.id)
+                .where(merchants.c.id == context.merchant_id)
+                .with_for_update()
+            ).scalar_one_or_none()
             self._ensure_draft(connection, context)
-            row = self._select_draft(connection, context)
+            row = self._select_draft(connection, context, for_update=True)
+            if row["pending_preparation_id"] is not None:
+                pending = connection.execute(
+                    select(booking_preparations).where(
+                        booking_preparations.c.id == row["pending_preparation_id"]
+                    )
+                ).mappings().one_or_none()
+                merchant_now = self.now_provider(ZoneInfo("UTC"))
+                if (
+                    pending is not None
+                    and pending["status"] in {"prepared", "presented"}
+                    and pending["expires_at"] <= merchant_now
+                ):
+                    connection.execute(
+                        booking_preparations.update()
+                        .where(booking_preparations.c.id == pending["id"])
+                        .values(status="expired", updated_at=func.now())
+                    )
+                    connection.execute(
+                        booking_drafts.update()
+                        .where(booking_drafts.c.id == row["id"])
+                        .values(
+                            selected_candidate_id=None,
+                            pending_preparation_id=None,
+                            version=row["version"] + 1,
+                            updated_at=func.now(),
+                        )
+                    )
+                    row = self._select_draft(connection, context)
         return BookingDraft.model_validate(dict(row))
 
     def update_draft(
@@ -511,10 +609,17 @@ class PostgresStore:
         changes: dict[DraftFieldName, object],
     ) -> tuple[BookingDraft, list[DraftFieldName]]:
         with self.engine.begin() as connection:
+            connection.execute(
+                select(merchants.c.id)
+                .where(merchants.c.id == context.merchant_id)
+                .with_for_update()
+            ).scalar_one_or_none()
             self._ensure_draft(connection, context)
             current = self._select_draft(connection, context, for_update=True)
             if current["version"] != expected_version:
                 raise DraftVersionConflictError(current_version=current["version"])
+            if current["booking_id"] is not None:
+                raise BookingAlreadySubmittedError(str(current["booking_id"]))
 
             normalized_changes = dict(changes)
             preference_changed = (
@@ -593,6 +698,17 @@ class PostgresStore:
                 update_values["availability_revision"] = (
                     current["availability_revision"] + 1
                 )
+            if current["pending_preparation_id"] is not None:
+                connection.execute(
+                    booking_preparations.update()
+                    .where(
+                        booking_preparations.c.id == current["pending_preparation_id"],
+                        booking_preparations.c.status.in_(["prepared", "presented"]),
+                    )
+                    .values(status="cancelled", updated_at=func.now())
+                )
+                update_values["selected_candidate_id"] = None
+                update_values["pending_preparation_id"] = None
             connection.execute(
                 booking_drafts.update()
                 .where(booking_drafts.c.id == current["id"])
@@ -605,7 +721,13 @@ class PostgresStore:
         self,
         context: VoiceRequestContext,
         expected_availability_revision: int,
-    ) -> tuple[dict, dict, dict, list[StaffWorkingWindow]]:
+    ) -> tuple[
+        dict,
+        dict,
+        dict,
+        list[StaffWorkingWindow],
+        list[OccupiedInterval],
+    ]:
         with self.engine.begin() as connection:
             self._ensure_draft(connection, context)
             draft = dict(self._select_draft(connection, context))
@@ -680,14 +802,44 @@ class PostgresStore:
                 )
                 for row in rows
             ]
-        return draft, dict(merchant), dict(service), windows
+            now_utc = self.now_provider(ZoneInfo("UTC"))
+            booked_rows = connection.execute(
+                select(
+                    bookings.c.staff_id,
+                    bookings.c.busy_starts_at,
+                    bookings.c.busy_ends_at,
+                ).where(
+                    bookings.c.merchant_id == context.merchant_id,
+                    bookings.c.busy_ends_at > now_utc,
+                )
+            ).mappings()
+            held_rows = connection.execute(
+                select(
+                    booking_preparations.c.staff_id,
+                    booking_preparations.c.busy_starts_at,
+                    booking_preparations.c.busy_ends_at,
+                ).where(
+                    booking_preparations.c.merchant_id == context.merchant_id,
+                    booking_preparations.c.status.in_(["prepared", "presented"]),
+                    booking_preparations.c.expires_at > now_utc,
+                )
+            ).mappings()
+            occupied = [
+                OccupiedInterval(
+                    staff_id=row["staff_id"],
+                    busy_starts_at=row["busy_starts_at"],
+                    busy_ends_at=row["busy_ends_at"],
+                )
+                for row in [*booked_rows, *held_rows]
+            ]
+        return draft, dict(merchant), dict(service), windows, occupied
 
     def search_availability(
         self,
         context: VoiceRequestContext,
         expected_availability_revision: int,
     ) -> AvailabilitySearchResult:
-        draft, merchant, service, windows = self._load_availability_inputs(
+        draft, merchant, service, windows, occupied = self._load_availability_inputs(
             context,
             expected_availability_revision,
         )
@@ -703,6 +855,7 @@ class PostgresStore:
             windows=windows,
             limit=merchant["candidate_limit"],
             not_before=merchant_now,
+            occupied_intervals=occupied,
         )
         alternatives = []
         if not candidates:
@@ -717,6 +870,7 @@ class PostgresStore:
                 slot_interval_minutes=merchant["slot_interval_minutes"],
                 preferred_time_of_day=draft["preferred_time_of_day"],
                 windows=windows,
+                occupied_intervals=occupied,
             )
 
         search_id = uuid4()
@@ -929,3 +1083,70 @@ class PostgresStore:
             alternative_dates=alternatives,
             created_at=search["created_at"],
         )
+
+    def prepare_booking(
+        self,
+        context: VoiceRequestContext,
+        expected_version: int,
+        candidate_id: UUID,
+    ) -> BookingOperationResult:
+        return self.booking_service.prepare(
+            context,
+            expected_version=expected_version,
+            candidate_id=candidate_id,
+        )
+
+    def mark_booking_preparation_presented(
+        self,
+        context: VoiceRequestContext,
+        preparation_id: UUID,
+        expected_draft_version: int,
+        presentation_id: str,
+    ) -> BookingOperationResult:
+        return self.booking_service.mark_presented(
+            context,
+            preparation_id,
+            expected_draft_version=expected_draft_version,
+            presentation_id=presentation_id,
+        )
+
+    def confirm_booking(
+        self,
+        context: VoiceRequestContext,
+        preparation_id: UUID,
+        expected_draft_version: int,
+        confirmation_event_id: str,
+    ) -> BookingOperationResult:
+        return self.booking_service.confirm(
+            context,
+            preparation_id,
+            expected_draft_version=expected_draft_version,
+            confirmation_event_id=confirmation_event_id,
+        )
+
+    def get_booking_status(
+        self,
+        context: VoiceRequestContext,
+        operation_id: UUID,
+    ) -> BookingOperationResult:
+        return self.booking_service.get_status(context, operation_id)
+
+    def get_customer_booking(
+        self,
+        confirmation_code: str,
+        access_token: str,
+    ) -> BookingRecord:
+        return self.booking_service.get_customer_booking(
+            confirmation_code,
+            access_token,
+        )
+
+    def list_merchant_bookings(self, merchant_id: str) -> MerchantBookingList:
+        return self.booking_service.list_merchant_bookings(merchant_id)
+
+    def get_merchant_booking(
+        self,
+        merchant_id: str,
+        booking_id: UUID,
+    ) -> BookingRecord:
+        return self.booking_service.get_merchant_booking(merchant_id, booking_id)

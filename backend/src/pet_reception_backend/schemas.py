@@ -259,6 +259,9 @@ class BookingDraft(BaseModel):
     ] | None
     staff_preference_text: str | None
     staff_id: str | None
+    selected_candidate_id: UUID | None
+    pending_preparation_id: UUID | None
+    booking_id: UUID | None
     created_at: datetime
     updated_at: datetime
 
@@ -327,3 +330,114 @@ class AvailabilitySearchResult(BaseModel):
 class AvailabilityToolResult(BaseModel):
     search: AvailabilitySearchResult
     context: VoiceRequestContext
+
+
+class PrepareBookingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=0)
+    candidate_id: UUID
+
+
+class MarkPreparationPresentedRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_draft_version: int = Field(ge=0)
+
+
+class ConfirmBookingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_draft_version: int = Field(ge=0)
+
+
+class BookingSummary(BaseModel):
+    merchant_id: str
+    merchant_display_name: str
+    service_id: str
+    service_name_zh: str
+    staff_id: str
+    staff_display_name: str
+    starts_at: datetime
+    ends_at: datetime
+    merchant_time_zone: str
+    customer_name: str
+    contact_phone: str
+    pet_name: str
+    pet_species: str
+    pet_breed: str | None
+    pet_age_years: Decimal | None
+    pet_care_notes: str | None
+    need_description: str | None
+    source: Literal["server_booking_snapshot"] = "server_booking_snapshot"
+
+
+class BookingPreparation(BaseModel):
+    id: UUID
+    operation_id: UUID
+    draft_id: UUID
+    draft_version: int
+    candidate_id: UUID
+    status: Literal["prepared", "presented", "confirmed", "expired", "cancelled"]
+    summary: BookingSummary
+    summary_digest: str
+    presentation_id: str | None
+    expires_at: datetime
+    availability_held: bool
+    booking_created: bool
+    created_at: datetime
+
+
+class BookingPreparationToolResult(BaseModel):
+    preparation: BookingPreparation
+    context: VoiceRequestContext
+
+
+class BookingRecord(BaseModel):
+    id: UUID
+    operation_id: UUID
+    preparation_id: UUID
+    merchant_id: str
+    merchant_display_name: str
+    staff_id: str
+    staff_display_name: str
+    service_id: str
+    service_name_zh: str
+    customer_name: str
+    contact_phone: str
+    pet_name: str
+    pet_species: str
+    pet_breed: str | None
+    pet_age_years: Decimal | None
+    pet_care_notes: str | None
+    need_description: str | None
+    starts_at: datetime
+    ends_at: datetime
+    merchant_time_zone: str
+    confirmation_code: str
+    status: Literal["confirmed"]
+    created_at: datetime
+
+
+class CustomerBookingCredential(BaseModel):
+    confirmation_code: str
+    access_token: str
+    credential_url: str
+
+
+class BookingOperationResult(BaseModel):
+    operation_id: UUID
+    status: Literal["prepared", "presented", "confirmed", "expired", "cancelled"]
+    preparation: BookingPreparation | None = None
+    booking: BookingRecord | None = None
+    customer_credential: CustomerBookingCredential | None = None
+    context: VoiceRequestContext | None = None
+
+
+class CustomerBookingResult(BaseModel):
+    booking: BookingRecord
+
+
+class MerchantBookingList(BaseModel):
+    merchant_id: str
+    bookings: list[BookingRecord]
