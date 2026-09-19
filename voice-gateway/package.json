@@ -8,7 +8,8 @@
     "start": "node src/index.mjs",
     "test": "node --test",
     "probe:tool": "node scripts/probe-tool.mjs",
-    "probe:m4": "node scripts/probe-m4-business-tools.mjs"
+    "probe:m4": "node scripts/probe-m4-business-tools.mjs",
+    "probe:m4-confirm-loss": "node scripts/probe-m4-confirm-response-loss.mjs"
   },
   "dependencies": {
     "dotenv": "17.4.2",

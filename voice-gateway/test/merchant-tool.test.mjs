@@ -298,3 +298,62 @@ test('truncated successful write response is not treated as a successful null re
     await backend.close()
   }
 })
+
+test('a socket reset after a confirmation write is reported as result_unknown', async () => {
+  const backend = await listen((request) => {
+    request.resume()
+    request.on('end', () => request.socket.destroy())
+  })
+
+  try {
+    const client = new MerchantToolClient({
+      backendBaseUrl: backend.origin,
+      merchantId: 'demo-grooming-001',
+      serviceToken: 'test-service-token',
+    })
+    await assert.rejects(
+      client.confirmBooking({
+        ownerId: 'user_signed-owner', sessionId: 'session-a', turnId: 'turn-confirm',
+      }, '22222222-2222-4222-8222-222222222222', 2, 'confirmation_event_1'),
+      { name: 'BusinessToolResultUnknownError', code: 'result_unknown' },
+    )
+  } finally {
+    await backend.close()
+  }
+})
+
+test('programmer TypeError and explicit business conflict are not transport unknowns', async () => {
+  const typeError = new TypeError('invalid request arguments')
+  const invalidClient = new MerchantToolClient({
+    backendBaseUrl: 'http://127.0.0.1:1',
+    merchantId: 'demo-grooming-001',
+    serviceToken: 'test-service-token',
+    fetchImpl: async () => { throw typeError },
+  })
+  await assert.rejects(
+    invalidClient.confirmBooking({
+      ownerId: 'user_signed-owner', sessionId: 'session-a', turnId: 'turn-confirm',
+    }, '22222222-2222-4222-8222-222222222222', 2, 'confirmation_event_1'),
+    (error) => error === typeError,
+  )
+
+  const backend = await listen((_request, response) => {
+    response.writeHead(409, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify({ detail: { code: 'conflict', reason: 'test conflict' } }))
+  })
+  try {
+    const conflictClient = new MerchantToolClient({
+      backendBaseUrl: backend.origin,
+      merchantId: 'demo-grooming-001',
+      serviceToken: 'test-service-token',
+    })
+    await assert.rejects(
+      conflictClient.confirmBooking({
+        ownerId: 'user_signed-owner', sessionId: 'session-a', turnId: 'turn-confirm',
+      }, '22222222-2222-4222-8222-222222222222', 2, 'confirmation_event_1'),
+      { name: 'BusinessToolHttpError', status: 409, code: 'conflict' },
+    )
+  } finally {
+    await backend.close()
+  }
+})

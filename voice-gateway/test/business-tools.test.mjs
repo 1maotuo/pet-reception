@@ -796,6 +796,93 @@ test('an uncertain confirmation response is verified by operation id without res
   assert.equal(statusCalls, 1)
 })
 
+test('an uncertain confirmation stays unknown while the same operation is only presented', async () => {
+  let confirmCalls = 0
+  let statusCalls = 0
+  const toolClient = {
+    getBookingDraft: async () => ({ draft: draft() }),
+    prepareBooking: async () => preparationResult(),
+    markBookingPresented: async () => ({ ...preparationResult(), status: 'presented' }),
+    confirmBooking: async () => {
+      confirmCalls += 1
+      const error = new Error('connection ended after write')
+      error.code = 'result_unknown'
+      throw error
+    },
+    getBookingStatus: async (_received, operationId) => {
+      statusCalls += 1
+      return {
+        ...preparationResult(),
+        operation_id: operationId,
+        status: 'presented',
+        preparation: { ...preparationResult().preparation, status: 'presented' },
+      }
+    },
+  }
+  const coordinator = new MerchantCoordinator({ toolClient })
+  const prepared = await coordinator.runBusinessTool(
+    'prepare_booking',
+    { candidate_id: '33333333-3333-4333-8333-333333333333' },
+    context,
+  )
+  await coordinator.markBookingPresented({
+    preparationId: prepared.presentation.preparationId,
+    eventId: prepared.presentation.eventId,
+  }, { ...context, transcript: completeSummaryTranscript() })
+
+  await assert.rejects(
+    coordinator.runBusinessTool(
+      'confirm_booking',
+      { preparation_id: prepared.presentation.preparationId },
+      { ...context, turnId: 'turn-confirm-unknown', invocationId: 'confirm-unknown-presented' },
+    ),
+    (error) => (
+      error.code === 'result_unknown'
+      && error.operationId === preparationResult().operation_id
+      && error.observedStatus === 'presented'
+    ),
+  )
+  assert.equal(confirmCalls, 1)
+  assert.equal(statusCalls, 1)
+})
+
+test('an uncertain confirmation keeps its operation id when status lookup also fails', async () => {
+  const toolClient = {
+    getBookingDraft: async () => ({ draft: draft() }),
+    prepareBooking: async () => preparationResult(),
+    markBookingPresented: async () => ({ ...preparationResult(), status: 'presented' }),
+    confirmBooking: async () => {
+      const error = new Error('connection ended after write')
+      error.code = 'result_unknown'
+      throw error
+    },
+    getBookingStatus: async () => { throw new TypeError('status connection failed') },
+  }
+  const coordinator = new MerchantCoordinator({ toolClient })
+  const prepared = await coordinator.runBusinessTool(
+    'prepare_booking',
+    { candidate_id: '33333333-3333-4333-8333-333333333333' },
+    context,
+  )
+  await coordinator.markBookingPresented({
+    preparationId: prepared.presentation.preparationId,
+    eventId: prepared.presentation.eventId,
+  }, { ...context, transcript: completeSummaryTranscript() })
+
+  await assert.rejects(
+    coordinator.runBusinessTool(
+      'confirm_booking',
+      { preparation_id: prepared.presentation.preparationId },
+      { ...context, turnId: 'turn-confirm-query-fails', invocationId: 'confirm-query-fails' },
+    ),
+    (error) => (
+      error.code === 'result_unknown'
+      && error.operationId === preparationResult().operation_id
+      && error.detail?.recovery === 'query_same_operation'
+    ),
+  )
+})
+
 test('late business result is attached without causing speech or a second submit', async () => {
   process.env.PET_RECEPTION_FRONTEND_TOOL_ALLOWLIST = 'get_merchant_info'
   const require = createRequire(import.meta.url)

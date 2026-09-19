@@ -42,6 +42,23 @@ function requestSignal(externalSignal, timeoutMs) {
     : timeoutSignal
 }
 
+const POSSIBLY_COMMITTED_TRANSPORT_CODES = new Set([
+  'ECONNRESET',
+  'EPIPE',
+  'ETIMEDOUT',
+  'UND_ERR_ABORTED',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_SOCKET',
+])
+
+function writeOutcomeMayBeUnknown(error) {
+  if (['AbortError', 'TimeoutError'].includes(error?.name)) return true
+  if (error?.name !== 'TypeError') return false
+  const causeCode = String(error?.cause?.code || '').toUpperCase()
+  return POSSIBLY_COMMITTED_TRANSPORT_CODES.has(causeCode)
+}
+
 function stableJson(value) {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
   if (value && typeof value === 'object') {
@@ -187,7 +204,7 @@ export class MerchantToolClient {
         signal: requestSignal(context.signal, this.requestTimeoutMs),
       })
     } catch (error) {
-      if (method !== 'GET' && ['AbortError', 'TimeoutError'].includes(error?.name)) {
+      if (method !== 'GET' && writeOutcomeMayBeUnknown(error)) {
         throw new BusinessToolResultUnknownError(operation, error)
       }
       throw error
@@ -884,8 +901,28 @@ export class MerchantCoordinator {
         if (error?.code !== 'result_unknown') throw error
         try {
           result = await this.toolClient.getBookingStatus(context, presentation.operationId)
-        } catch {
+          if (
+            !['awaiting_payment', 'confirmed', 'payment_expired'].includes(result.status)
+            || !result.booking
+          ) {
+            error.operationId = presentation.operationId
+            error.observedStatus = result.status
+            error.detail = {
+              code: 'result_unknown',
+              operation_id: presentation.operationId,
+              observed_status: result.status,
+              recovery: 'query_same_operation',
+            }
+            throw error
+          }
+        } catch (statusError) {
+          if (statusError === error) throw error
           error.operationId = presentation.operationId
+          error.detail = {
+            code: 'result_unknown',
+            operation_id: presentation.operationId,
+            recovery: 'query_same_operation',
+          }
           throw error
         }
       }
