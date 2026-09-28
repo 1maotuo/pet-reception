@@ -9,6 +9,7 @@ test('renders a store-specific M4 booking front desk prompt from trusted configu
   process.env.VOICE_GATEWAY_SERVICE_TOKEN = 'test-service-token'
   process.env.QWEN_AUDIO_AGENT_AUTH_SECRET = 'test-auth-secret-at-least-32-characters'
   delete process.env.MERCHANT_CONFIG_PATH
+  process.env.DEMO_MERCHANT_ID = 'demo-grooming-001'
   delete process.env.VOICE_TURN_DETECTION_TYPE
   delete process.env.VOICE_SILENCE_DURATION_MS
   delete process.env.VOICE_VAD_THRESHOLD
@@ -48,6 +49,10 @@ test('renders a store-specific M4 booking front desk prompt from trusted configu
   assert.match(instructions, /不得生成假的预约编号、[\s\S]*确认码、金额或支付结果/)
   assert.match(instructions, /七个业务工具/)
   assert.match(instructions, /`quote_service`/)
+  assert.match(instructions, /`missing_from_customer` 才是客户/)
+  assert.match(instructions, /`merchant_configuration_issues` 是商家配置问题/)
+  assert.match(instructions, /下一轮只补充体重/)
+  assert.match(instructions, /不能把只读询价偷偷变成预约选择/)
   assert.doesNotMatch(instructions, /推进用户\s*电脑上的实际工作/)
   assert.doesNotMatch(instructions, /\{\{TRUSTED_MERCHANT_CONTEXT\}\}/)
   assert.equal(configuration.merchantId, 'demo-grooming-001')
@@ -84,4 +89,22 @@ test('renders a store-specific M4 booking front desk prompt from trusted configu
   assert.match(instructions, /不能停在“稍等”/)
   assert.match(instructions, /不要承诺未经监控证实/)
   assert.match(instructions, /宠物名字属于身份字段/)
+})
+
+test('renders the runtime combination pricing demo into the actual frontend prompt', () => {
+  process.env.VOICE_GATEWAY_SERVICE_TOKEN = 'test-service-token'
+  process.env.QWEN_AUDIO_AGENT_AUTH_SECRET = 'test-auth-secret-at-least-32-characters'
+  process.env.MERCHANT_CONFIG_PATH = 'config/demo-grooming-combination-merchant.json'
+  process.env.DEMO_MERCHANT_ID = 'demo-grooming-combo-001'
+
+  const configuration = configureEnvironment()
+  const instructions = readFileSync(
+    resolve(process.env.QWEN_AUDIO_AGENT_FRONTEND_PROMPT_DIR, 'PROMPT.md'),
+    'utf8',
+  )
+
+  assert.equal(configuration.merchantId, 'demo-grooming-combo-001')
+  assert.match(configuration.initialGreeting, /犬猫美容组合计价演示店/)
+  assert.match(instructions, /Paws & Whiskers 犬猫美容组合计价演示店/)
+  assert.match(instructions, /"merchant_id": "demo-grooming-combo-001"/)
 })

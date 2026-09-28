@@ -1474,6 +1474,54 @@ test('quote_service is read-only and reports only the current quote goal', async
   assert.equal(result.output.effect.draft_mutated, false)
 })
 
+test('quote_service separates customer input from merchant configuration gaps', async () => {
+  const quotes = [
+    {
+      can_quote: false,
+      missing_for_quote: ['service_pricing_configuration'],
+      missing_for_booking: ['service_pricing_configuration', 'deposit_configuration'],
+      service_id: 'legacy-service',
+    },
+    {
+      can_quote: false,
+      missing_for_quote: ['weight'],
+      missing_for_booking: ['weight', 'deposit_configuration'],
+      service_id: 'configured-service',
+    },
+  ]
+  const coordinator = new MerchantCoordinator({
+    toolClient: {
+      quoteService: async () => ({ quote: quotes.shift() }),
+    },
+  })
+
+  const unavailable = await coordinator.runBusinessTool(
+    'quote_service',
+    { service_id: 'legacy-service' },
+    context,
+  )
+  assert.equal(unavailable.output.status, 'unavailable')
+  assert.deepEqual(unavailable.output.missing_from_customer, [])
+  assert.deepEqual(unavailable.output.merchant_configuration_issues, [
+    'service_pricing_configuration',
+    'deposit_configuration',
+  ])
+  assert.equal(unavailable.output.next_step.action, 'explain_quote_unavailable')
+
+  const needsWeight = await coordinator.runBusinessTool(
+    'quote_service',
+    { service_id: 'configured-service', pet_species: '犬' },
+    context,
+  )
+  assert.equal(needsWeight.output.status, 'needs_input')
+  assert.deepEqual(needsWeight.output.missing_from_customer, ['weight'])
+  assert.deepEqual(needsWeight.output.merchant_configuration_issues, [
+    'deposit_configuration',
+  ])
+  assert.equal(needsWeight.output.next_step.action, 'ask_one_field')
+  assert.equal(needsWeight.output.next_step.field, 'weight')
+})
+
 test('controlled summary rejects a wrong amount or missing paid add-on', () => {
   const priced = {
     ...summary(),

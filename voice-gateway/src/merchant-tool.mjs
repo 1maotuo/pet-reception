@@ -524,20 +524,64 @@ function draftPatch(args, expectedVersion) {
 
 function quoteReceipt(result) {
   const quote = result.quote
-  const missing = quote.missing_for_quote || []
+  const missingForQuote = quote.missing_for_quote || []
+  const missingForBooking = quote.missing_for_booking || []
+  const customerInputFields = new Set([
+    'pet_species',
+    'service_id',
+    'service_selection',
+    'weight',
+    'weight_clarification',
+  ])
+  const isMerchantConfigurationIssue = (field) => (
+    field === 'service_pricing_configuration'
+    || field === 'service_price_configuration'
+    || field === 'deposit_configuration'
+    || field.startsWith('addon_price:')
+    || field.startsWith('addon_duration:')
+  )
+  const customerMissing = missingForQuote.filter((field) => customerInputFields.has(field))
+  const merchantConfigurationIssues = [...new Set(
+    [...missingForQuote, ...missingForBooking].filter(isMerchantConfigurationIssue),
+  )]
+  const quoteConfigurationIssues = missingForQuote.filter(isMerchantConfigurationIssue)
+  const operationalRequirements = missingForQuote.filter(
+    (field) => !customerInputFields.has(field) && !isMerchantConfigurationIssue(field),
+  )
+  const quoteUnavailable = !quote.can_quote && (
+    quoteConfigurationIssues.length > 0 || operationalRequirements.length > 0
+  )
+  const status = quote.can_quote ? 'ok' : quoteUnavailable ? 'unavailable' : 'needs_input'
+  const nextStep = quote.can_quote
+    ? { action: 'answer_quote', type: 'answer_quote', for_goal: 'quote_service' }
+    : quoteUnavailable
+      ? {
+          action: 'explain_quote_unavailable',
+          type: 'explain_quote_unavailable',
+          for_goal: 'quote_service',
+        }
+      : {
+          action: 'ask_one_field',
+          type: 'ask_one_field',
+          field: customerMissing[0],
+          for_goal: 'quote_service',
+        }
   return {
-    status: quote.can_quote ? 'ok' : 'needs_input',
+    status,
     current_goal: 'quote_service',
     ready_for_current_goal: quote.can_quote,
-    missing_for_current_goal: missing,
-    missing_for_booking_later: quote.missing_for_booking || [],
+    missing_for_current_goal: customerMissing,
+    missing_from_customer: customerMissing,
+    merchant_configuration_issues: merchantConfigurationIssues,
+    operational_requirements: operationalRequirements,
+    missing_for_booking_later: missingForBooking,
     current_state: { quote },
     effect: { type: 'service_quote_read', applied: true, draft_mutated: false },
-    next_step: missing.length
-      ? { action: 'ask_one_field', type: 'ask_one_field', field: missing[0], for_goal: 'quote_service' }
-      : { action: 'answer_quote', type: 'answer_quote', for_goal: 'quote_service' },
+    next_step: nextStep,
     quote,
-    boundary: '本结果只读，不表示已选择服务、占位或创建预约。',
+    boundary: quoteUnavailable
+      ? '本结果只读；报价因商家配置或人工评估条件暂不可用，不能要求客户补商家配置，也不表示已选择服务、占位或创建预约。'
+      : '本结果只读，不表示已选择服务、占位或创建预约。',
   }
 }
 
