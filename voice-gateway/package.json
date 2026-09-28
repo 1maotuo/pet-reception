@@ -9,6 +9,7 @@
     "test": "node --test",
     "probe:tool": "node scripts/probe-tool.mjs",
     "probe:m4": "node scripts/probe-m4-business-tools.mjs",
+    "probe:combination-demo": "node scripts/probe-grooming-combination.mjs",
     "probe:m4-confirm-loss": "node scripts/probe-m4-confirm-response-loss.mjs",
     "probe:m4-restart": "node scripts/probe-m4-restart-recovery.mjs"
   },

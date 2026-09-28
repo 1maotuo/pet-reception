@@ -49,6 +49,8 @@ backend\.venv\Scripts\python.exe -m pip install -e backend --no-deps
 
 需要替换演示商家时，在本地 `.env` 同时设置匹配的 `DEMO_MERCHANT_ID` 和 `MERCHANT_CONFIG_PATH`，随后再次执行 `python -m pet_reception_backend.manage setup` 将配置 seed 到开发库。语音网关读取该受信文件，FastAPI 从 seed 后的 PostgreSQL 读取公开事实；文件内 ID 与环境变量不一致时启动失败，不会静默绑定到另一家商户。
 
+当前日常语音入口默认使用 `config/demo-grooming-combination-merchant.json` 中明确标注的“犬猫美容组合计价演示店”（`demo-grooming-combo-001`）。它包含犬类洗澡、犬类理发、猫类美容、单独剪指甲、体重分档、收费附加项和有金额的本地模拟预约金；所有金额和时长均为本地演示数据，不代表真实网站或门店政策。原 `config/demo-merchant.json` 与其历史预约继续保留；需要复测旧目录时必须同时切换上述两个环境变量并重启后端和网关。
+
 美容服务资料不是任意说明文字：每项服务可写 `supported_species`、`included_items`、
 `recommended_for`、`assessment_required_for`、`not_included` 和 `source`；商家级
 `grooming_policy` 写整体物种、人工评估、推荐与医疗边界。修改配置后必须重新执行 `manage setup`
@@ -141,8 +143,13 @@ npm run report:voice-latency
 
 ```powershell
 npm run probe:tool --workspace @pet-reception/voice-gateway
-npm run probe:m4 --workspace @pet-reception/voice-gateway
+npm run probe:combination-demo --workspace @pet-reception/voice-gateway
 ```
+
+`probe:combination-demo` 针对当前犬猫组合计价演示店，覆盖分档报价、套餐包含项、
+收费附加项、排班、受控摘要、预约金和客户页面模拟付款。旧目录专用的
+`probe:m4` 仍保留，但只应在同时切回 `demo-grooming-001` 与
+`config/demo-merchant.json` 后执行。
 
 ## M2 草稿与排班 API
 
@@ -151,7 +158,7 @@ npm run probe:m4 --workspace @pet-reception/voice-gateway
 - `GET /api/internal/voice/merchant-info`：从 PostgreSQL 读取当前绑定商家和服务。
 - `GET /api/internal/voice/booking-draft`：按受信 `merchant + owner + voice session` 获取或创建一个草稿。
 - `PATCH /api/internal/voice/booking-draft`：批量更新、纠正或显式清空字段；必须携带当前 `expected_version`。
-- `POST /api/internal/voice/service-quotes`：阶段 A 的受保护只读报价；询价条件全部显式传入，商家身份来自受信请求头，不读取或修改预约草稿。当前未注册为 Qwen 实时工具。
+- `POST /api/internal/voice/service-quotes`：受保护只读报价；询价条件全部显式传入，商家身份来自受信请求头，不读取或修改预约草稿；已通过 `quote_service` 注册到当前 Qwen 实时会话。
 - `POST /api/internal/voice/availability-searches`：只从当前受信草稿取服务、日期、时段和人员，查询 PostgreSQL 排班。
 - `GET /api/internal/voice/availability-searches/{id}`：重新读取持久化结果，并检查它对当前排班条件是否仍有效。
 
