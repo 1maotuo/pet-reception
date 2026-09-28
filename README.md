@@ -151,6 +151,7 @@ npm run probe:m4 --workspace @pet-reception/voice-gateway
 - `GET /api/internal/voice/merchant-info`：从 PostgreSQL 读取当前绑定商家和服务。
 - `GET /api/internal/voice/booking-draft`：按受信 `merchant + owner + voice session` 获取或创建一个草稿。
 - `PATCH /api/internal/voice/booking-draft`：批量更新、纠正或显式清空字段；必须携带当前 `expected_version`。
+- `POST /api/internal/voice/service-quotes`：阶段 A 的受保护只读报价；询价条件全部显式传入，商家身份来自受信请求头，不读取或修改预约草稿。当前未注册为 Qwen 实时工具。
 - `POST /api/internal/voice/availability-searches`：只从当前受信草稿取服务、日期、时段和人员，查询 PostgreSQL 排班。
 - `GET /api/internal/voice/availability-searches/{id}`：重新读取持久化结果，并检查它对当前排班条件是否仍有效。
 
@@ -171,6 +172,12 @@ Push-Location backend
 Pop-Location
 Remove-Item Env:RUN_POSTGRES_TESTS
 ```
+
+### 宠物美容组合与计价（阶段 A）
+
+`MerchantService.service_configuration` 是可选的强类型 JSONB 配置。它可以表达套餐或独立单项、稳定标识的包含项目、收费附加项、犬/猫独立服务、连续且无重叠的 lb/kg 体重档、价格语义和时长影响。金额统一使用整数美分。未配置结构化价格的旧服务继续返回原 `price_note`，不会把未知金额当作 0。
+
+当前 `config/demo-merchant.json` 没有被测试价格覆盖；完整商业价格表、体重档边界、附加项时长和预约金金额仍待商家确认。自动测试只使用 `backend/tests/fixtures/synthetic-grooming-merchant.json` 中明确标注的 synthetic 数据。阶段 A 不修改草稿、生产排班、prepare/confirm、模拟付款页面，也不向实时模型开放报价工具。
 
 后端正在运行时，可执行一次独立 session 的开发库 HTTP 演示（只写带 `m2_probe_` 标识的演示草稿，不打印服务令牌）：
 
