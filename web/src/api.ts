@@ -22,6 +22,22 @@ export type BookingRecord = {
   pet_age_years: string | number | null
   pet_care_notes: string | null
   need_description: string | null
+  selected_addon_ids: string[]
+  service_quote: {
+    line_items: Array<{
+      item_id: string
+      display_name: string
+      kind: 'base_service' | 'addon' | 'included_selection'
+      pricing_semantics: string
+      amount_min_cents: number | null
+      amount_max_cents: number | null
+    }>
+    currency: string | null
+    total_semantics: string
+    total_min_cents: number | null
+    total_max_cents: number | null
+    legacy_price_note: string
+  } | null
   starts_at: string
   ends_at: string
   merchant_time_zone: string
@@ -31,6 +47,12 @@ export type BookingRecord = {
   paid_at: string | null
   payment_expired_at: string | null
   payment_method: string | null
+  deposit_amount_cents: number | null
+  deposit_currency: string | null
+  deposit_application: 'applied_to_service_total' | 'application_unconfirmed' | null
+  deposit_note: string | null
+  payment_amount_cents: number | null
+  payment_currency: string | null
   status: 'awaiting_payment' | 'confirmed' | 'payment_expired'
 }
 

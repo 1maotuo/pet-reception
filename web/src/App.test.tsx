@@ -98,6 +98,15 @@ describe('App', () => {
       pet_age_years: null,
       pet_care_notes: null,
       need_description: null,
+      selected_addon_ids: ['teeth-brushing'],
+      service_quote: {
+        line_items: [
+          { item_id: 'service', display_name: '基础洗护', kind: 'base_service', pricing_semantics: 'fixed', amount_min_cents: 6000, amount_max_cents: 6000 },
+          { item_id: 'teeth-brushing', display_name: '刷牙', kind: 'addon', pricing_semantics: 'fixed', amount_min_cents: 1200, amount_max_cents: 1200 },
+        ],
+        currency: 'USD', total_semantics: 'fixed', total_min_cents: 7200,
+        total_max_cents: 7200, legacy_price_note: 'synthetic',
+      },
       starts_at: '2026-12-01T17:00:00Z',
       ends_at: '2026-12-01T18:00:00Z',
       merchant_time_zone: 'America/Los_Angeles',
@@ -107,6 +116,12 @@ describe('App', () => {
       paid_at: null,
       payment_expired_at: null,
       payment_method: null,
+      deposit_amount_cents: 2000,
+      deposit_currency: 'USD',
+      deposit_application: 'applied_to_service_total',
+      deposit_note: '测试预约金',
+      payment_amount_cents: null,
+      payment_currency: null,
       status: 'awaiting_payment',
     }
     const fetchMock = vi.fn()
@@ -119,6 +134,8 @@ describe('App', () => {
             confirmation_code: 'PR-CONFIRMED',
             paid_at: '2026-09-20T00:00:00Z',
             payment_method: 'local_simulation',
+            payment_amount_cents: 2000,
+            payment_currency: 'USD',
             status: 'confirmed',
           },
         }),
@@ -129,7 +146,10 @@ describe('App', () => {
 
     expect(await screen.findByText('等待模拟支付')).toBeInTheDocument()
     expect(screen.queryByText('预约已确认')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '模拟支付成功' }))
+    expect(screen.getByText('US$72.00')).toBeInTheDocument()
+    expect(screen.getByText('刷牙')).toBeInTheDocument()
+    expect(screen.getByText('US$20.00')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '模拟支付预约金' }))
     expect(await screen.findByText('预约已确认')).toBeInTheDocument()
     expect(screen.getByText('PR-CONFIRMED')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenLastCalledWith(

@@ -32,6 +32,7 @@ from .schemas import (
     MerchantBookingList,
     VoiceRequestContext,
 )
+from .service_catalog import calculate_draft_quote, quote_fingerprint
 
 
 @dataclass(slots=True)
@@ -255,6 +256,9 @@ class BookingService:
             pet_age_text=row["pet_age_text"],
             pet_care_notes=row["pet_care_notes"],
             need_description=row["need_description"],
+            pet_weight=summary.pet_weight,
+            selected_addon_ids=summary.selected_addon_ids,
+            service_quote=summary.service_quote,
             starts_at=row["starts_at"].astimezone(zone),
             ends_at=row["ends_at"].astimezone(zone),
             merchant_time_zone=row["merchant_time_zone"],
@@ -264,6 +268,12 @@ class BookingService:
             paid_at=row["paid_at"],
             payment_expired_at=row["payment_expired_at"],
             payment_method=row["payment_method"],
+            deposit_amount_cents=row["deposit_amount_cents"],
+            deposit_currency=row["deposit_currency"],
+            deposit_application=row["deposit_application"],
+            deposit_note=row["deposit_note"],
+            payment_amount_cents=row["payment_amount_cents"],
+            payment_currency=row["payment_currency"],
             status=row["status"],
             created_at=row["created_at"],
         )
@@ -415,6 +425,12 @@ class BookingService:
                         "search_time_of_day"
                     ),
                     availability_searches.c.staff_id.label("search_staff_id"),
+                    availability_searches.c.scheduling_duration_minutes.label(
+                        "search_duration_minutes"
+                    ),
+                    availability_searches.c.combination_fingerprint.label(
+                        "search_combination_fingerprint"
+                    ),
                 )
                 .select_from(
                     availability_candidates.join(
@@ -469,6 +485,27 @@ class BookingService:
             )
             if invalid:
                 raise BookingInvalidFieldsError(invalid_fields=invalid)
+            quote = calculate_draft_quote(connection, context.merchant_id, dict(draft))
+            if quote is None:
+                raise BookingNeedsInputError(missing_fields=("service_id",))
+            if quote.service_kind is not None:
+                if quote.missing_for_booking or not quote.can_quote or not quote.can_schedule:
+                    raise BookingNeedsInputError(
+                        missing_fields=tuple(quote.missing_for_booking)
+                    )
+                if quote.deposit_amount_cents is None:
+                    raise BookingNeedsInputError(
+                        missing_fields=("deposit_configuration",)
+                    )
+            if (
+                quote.scheduling_duration_minutes is None
+                or quote_fingerprint(quote) != candidate["search_combination_fingerprint"]
+                or quote.scheduling_duration_minutes != candidate["search_duration_minutes"]
+                or candidate["ends_at"]
+                != candidate["starts_at"]
+                + timedelta(minutes=quote.scheduling_duration_minutes)
+            ):
+                raise CandidateUnavailableError("service_combination_changed")
 
             now = self.now_provider()
             self._expire_merchant_payment_holds(
@@ -555,6 +592,9 @@ class BookingService:
                 pet_age_text=draft["pet_age_text"],
                 pet_care_notes=draft["pet_care_notes"],
                 need_description=draft["need_description"],
+                pet_weight=draft["pet_weight"],
+                selected_addon_ids=draft["selected_addon_ids"] or [],
+                service_quote=quote,
             )
             summary = summary_model.model_dump(mode="json")
             expires_at = now + timedelta(minutes=self.hold_minutes)
@@ -657,6 +697,17 @@ class BookingService:
                 )
                 if invalid:
                     raise BookingInvalidFieldsError(invalid_fields=invalid)
+                current_quote = calculate_draft_quote(
+                    connection, context.merchant_id, dict(draft)
+                )
+                frozen_quote = BookingSummary.model_validate(
+                    preparation["summary"]
+                ).service_quote
+                if frozen_quote is not None and (
+                    current_quote is None
+                    or quote_fingerprint(current_quote) != quote_fingerprint(frozen_quote)
+                ):
+                    raise BookingConfirmationConflictError("commercial_terms_changed")
                 if preparation["status"] == "presented":
                     if preparation["presentation_id"] != presentation_id:
                         raise BookingConfirmationConflictError("different_presentation")
@@ -773,6 +824,16 @@ class BookingService:
                 )
                 if invalid:
                     raise BookingInvalidFieldsError(invalid_fields=invalid)
+                current_quote = calculate_draft_quote(
+                    connection, context.merchant_id, dict(draft)
+                )
+                summary_model = BookingSummary.model_validate(preparation["summary"])
+                if summary_model.service_quote is not None and (
+                    current_quote is None
+                    or quote_fingerprint(current_quote)
+                    != quote_fingerprint(summary_model.service_quote)
+                ):
+                    raise BookingConfirmationConflictError("commercial_terms_changed")
                 reused_event = connection.execute(
                     select(booking_preparations.c.id).where(
                         booking_preparations.c.merchant_id == context.merchant_id,
@@ -838,6 +899,8 @@ class BookingService:
                         pet_age_text=draft["pet_age_text"],
                         pet_care_notes=draft["pet_care_notes"],
                         need_description=draft["need_description"],
+                        pet_weight=draft["pet_weight"],
+                        selected_addon_ids=draft["selected_addon_ids"] or [],
                         starts_at=preparation["starts_at"],
                         ends_at=preparation["ends_at"],
                         busy_starts_at=preparation["busy_starts_at"],
@@ -850,6 +913,22 @@ class BookingService:
                         confirmation_code=None,
                         customer_access_token_hash=self._token_hash(token),
                         payment_expires_at=payment_expires_at,
+                        deposit_amount_cents=(
+                            summary_model.service_quote.deposit_amount_cents
+                            if summary_model.service_quote else None
+                        ),
+                        deposit_currency=(
+                            summary_model.service_quote.deposit_currency
+                            if summary_model.service_quote else None
+                        ),
+                        deposit_application=(
+                            summary_model.service_quote.deposit_application
+                            if summary_model.service_quote else None
+                        ),
+                        deposit_note=(
+                            summary_model.service_quote.deposit_note
+                            if summary_model.service_quote else None
+                        ),
                         status="awaiting_payment",
                         created_at=now,
                     )
@@ -1084,6 +1163,8 @@ class BookingService:
                         paid_at=now,
                         payment_event_id=payment_event_id,
                         payment_method="local_simulation",
+                        payment_amount_cents=booking["deposit_amount_cents"],
+                        payment_currency=booking["deposit_currency"],
                     )
                     .returning(bookings)
                 ).mappings().one()

@@ -64,6 +64,8 @@ from .schemas import (
     VoiceRequestContext,
 )
 from .service_configuration import calculate_service_quote
+from .service_catalog import calculate_draft_quote, load_quote_merchant, quote_fingerprint
+from .service_configuration import ServiceQuoteRejectedError
 
 
 class MerchantNotFoundError(LookupError):
@@ -122,6 +124,9 @@ AVAILABILITY_FIELDS = frozenset(
         "preferred_time_of_day",
         "staff_preference_text",
         "staff_id",
+        "pet_species",
+        "pet_weight",
+        "selected_addon_ids",
     }
 )
 
@@ -134,6 +139,10 @@ class DataStore(Protocol):
         context: VoiceRequestContext,
         request: ServiceQuoteRequest,
     ) -> ServiceQuoteResult: ...
+
+    def quote_draft(
+        self, context: VoiceRequestContext, draft: BookingDraft
+    ) -> ServiceQuoteResult | None: ...
 
     def get_or_create_draft(self, context: VoiceRequestContext) -> BookingDraft: ...
 
@@ -247,6 +256,15 @@ class PostgresStore:
                 {
                     "id": service.id,
                     "duration_minutes": service.duration_minutes,
+                    **(
+                        {
+                            "service_configuration": service.service_configuration.model_dump(
+                                mode="json"
+                            )
+                        }
+                        if service.service_configuration is not None
+                        else {}
+                    ),
                 }
                 for service in merchant.services
             ],
@@ -397,6 +415,14 @@ class PostgresStore:
             request,
             foreign_addon_ids=foreign_addon_ids,
         )
+
+    def quote_draft(
+        self, context: VoiceRequestContext, draft: BookingDraft
+    ) -> ServiceQuoteResult | None:
+        with self.engine.connect() as connection:
+            return calculate_draft_quote(
+                connection, context.merchant_id, draft.model_dump(mode="json")
+            )
 
     def upsert_merchant(self, merchant: DemoMerchant) -> None:
         scheduling = getattr(merchant, "scheduling", None)
@@ -804,10 +830,12 @@ class PostgresStore:
                 ).scalar_one_or_none()
             self._ensure_draft(connection, context)
             row = self._select_draft(connection, context, for_update=True)
-            if row["version"] != 0 or any(
+            used = any(
                 row[field] is not None
                 for field in (*DRAFT_MUTABLE_FIELDS, "booking_id", "pending_preparation_id")
-            ):
+                if field != "selected_addon_ids"
+            ) or bool(row["selected_addon_ids"])
+            if row["version"] != 0 or used:
                 raise ValueError("new voice session is already in use")
         return BookingDraft.model_validate(dict(row))
 
@@ -843,6 +871,10 @@ class PostgresStore:
                 raise DraftVersionConflictError(current_version=current["version"])
 
             normalized_changes = dict(changes)
+            if "pet_weight" in normalized_changes and normalized_changes["pet_weight"] is not None:
+                normalized_changes["pet_weight"] = normalized_changes["pet_weight"].model_dump(
+                    mode="json"
+                )
             preference_changed = (
                 "staff_preference_text" in normalized_changes
                 and normalized_changes["staff_preference_text"]
@@ -892,6 +924,16 @@ class PostgresStore:
                     ).scalar_one_or_none()
                     if qualified is None:
                         raise StaffNotQualifiedError(str(effective_staff_id))
+
+            effective = dict(current)
+            effective.update(normalized_changes)
+            if effective.get("selected_addon_ids") and not effective_service_id:
+                raise ServiceQuoteRejectedError(
+                    "service_required_for_addons",
+                    effective["selected_addon_ids"][0],
+                )
+            if effective_service_id:
+                calculate_draft_quote(connection, context.merchant_id, effective)
 
             changed_fields = [
                 field
@@ -995,6 +1037,7 @@ class PostgresStore:
         dict,
         dict,
         dict,
+        ServiceQuoteResult,
         list[StaffWorkingWindow],
         list[OccupiedInterval],
     ]:
@@ -1049,6 +1092,13 @@ class PostgresStore:
             ).mappings().one_or_none()
             if service is None:
                 raise UnknownServiceError(str(draft["service_id"]))
+            quote = calculate_draft_quote(connection, context.merchant_id, draft)
+            if quote is None:
+                raise UnknownServiceError(str(draft["service_id"]))
+            if quote.missing_for_availability or not quote.can_schedule:
+                raise AvailabilityNeedsInputError(
+                    missing_fields=tuple(quote.missing_for_availability)
+                )
 
             statement = (
                 select(
@@ -1095,14 +1145,14 @@ class PostgresStore:
                 context.merchant_id,
                 now_utc,
             )
-        return draft, dict(merchant), dict(service), windows, occupied
+        return draft, dict(merchant), dict(service), quote, windows, occupied
 
     def search_availability(
         self,
         context: VoiceRequestContext,
         expected_availability_revision: int,
     ) -> AvailabilitySearchResult:
-        draft, merchant, service, windows, occupied = self._load_availability_inputs(
+        draft, merchant, service, quote, windows, occupied = self._load_availability_inputs(
             context,
             expected_availability_revision,
         )
@@ -1110,7 +1160,7 @@ class PostgresStore:
         candidates = self.candidate_calculator(
             requested_date=draft["preferred_date"],
             merchant_time_zone=merchant["time_zone"],
-            duration_minutes=service["duration_minutes"],
+            duration_minutes=quote.scheduling_duration_minutes,
             buffer_before_minutes=service["buffer_before_minutes"],
             buffer_after_minutes=service["buffer_after_minutes"],
             slot_interval_minutes=merchant["slot_interval_minutes"],
@@ -1127,7 +1177,7 @@ class PostgresStore:
                 alternative_days=merchant["alternative_days"],
                 candidate_limit=merchant["candidate_limit"],
                 merchant_time_zone=merchant["time_zone"],
-                duration_minutes=service["duration_minutes"],
+                duration_minutes=quote.scheduling_duration_minutes,
                 buffer_before_minutes=service["buffer_before_minutes"],
                 buffer_after_minutes=service["buffer_after_minutes"],
                 slot_interval_minutes=merchant["slot_interval_minutes"],
@@ -1216,7 +1266,7 @@ class PostgresStore:
                     alternative_days=merchant["alternative_days"],
                     candidate_limit=merchant["candidate_limit"],
                     merchant_time_zone=merchant["time_zone"],
-                    duration_minutes=service["duration_minutes"],
+                    duration_minutes=quote.scheduling_duration_minutes,
                     buffer_before_minutes=service["buffer_before_minutes"],
                     buffer_after_minutes=service["buffer_after_minutes"],
                     slot_interval_minutes=merchant["slot_interval_minutes"],
@@ -1247,6 +1297,8 @@ class PostgresStore:
                     preferred_date=draft["preferred_date"],
                     preferred_time_of_day=draft["preferred_time_of_day"],
                     staff_id=draft["staff_id"],
+                    scheduling_duration_minutes=quote.scheduling_duration_minutes,
+                    combination_fingerprint=quote_fingerprint(quote),
                     merchant_time_zone=merchant["time_zone"],
                     status=status,
                     alternative_dates=alternative_values,
@@ -1269,6 +1321,7 @@ class PostgresStore:
             preferred_date=draft["preferred_date"],
             preferred_time_of_day=draft["preferred_time_of_day"],
             staff_id=draft["staff_id"],
+            scheduling_duration_minutes=quote.scheduling_duration_minutes,
             merchant_time_zone=merchant["time_zone"],
             candidates=candidate_models,
             alternative_dates=[
@@ -1319,6 +1372,17 @@ class PostgresStore:
             candidate_rows = []
             occupied = []
             service = None
+            current_quote = None
+            if snapshot_is_current:
+                current_quote = calculate_draft_quote(
+                    connection, context.merchant_id, dict(draft)
+                )
+                if (
+                    current_quote is None
+                    or not current_quote.can_schedule
+                    or quote_fingerprint(current_quote) != search["combination_fingerprint"]
+                ):
+                    snapshot_is_current = False
             if snapshot_is_current:
                 candidate_rows = list(
                     connection.execute(
@@ -1385,7 +1449,7 @@ class PostgresStore:
                 )
                 busy_end = service_start_utc + timedelta(
                     minutes=(
-                        service["duration_minutes"]
+                        search["scheduling_duration_minutes"]
                         + service["buffer_after_minutes"]
                     )
                 )
@@ -1456,6 +1520,7 @@ class PostgresStore:
             preferred_date=search["preferred_date"],
             preferred_time_of_day=search["preferred_time_of_day"],
             staff_id=search["staff_id"],
+            scheduling_duration_minutes=search["scheduling_duration_minutes"],
             merchant_time_zone=search["merchant_time_zone"],
             candidates=candidates,
             alternative_dates=alternatives,

@@ -627,6 +627,58 @@ def add_grooming_service_configuration(connection: Connection) -> None:
     )
 
 
+def add_grooming_booking_combinations(connection: Connection) -> None:
+    """Persist Stage B customer selections, schedule facts and frozen deposits."""
+    connection.execute(text(
+        "ALTER TABLE booking_drafts "
+        "ADD COLUMN IF NOT EXISTS pet_weight JSONB, "
+        "ADD COLUMN IF NOT EXISTS selected_addon_ids JSONB NOT NULL DEFAULT '[]'::jsonb"
+    ))
+    connection.execute(text(
+        "ALTER TABLE availability_searches "
+        "ADD COLUMN IF NOT EXISTS scheduling_duration_minutes INTEGER, "
+        "ADD COLUMN IF NOT EXISTS combination_fingerprint VARCHAR(64)"
+    ))
+    connection.execute(text(
+        "UPDATE availability_searches s SET "
+        "scheduling_duration_minutes = ms.duration_minutes, "
+        "combination_fingerprint = md5(concat(s.service_id, ':legacy:', "
+        "ms.duration_minutes)) || md5(concat(s.service_id, ':legacy:', "
+        "ms.duration_minutes)) "
+        "FROM merchant_services ms WHERE ms.merchant_id = s.merchant_id "
+        "AND ms.id = s.service_id AND (s.scheduling_duration_minutes IS NULL "
+        "OR s.combination_fingerprint IS NULL)"
+    ))
+    connection.execute(text(
+        "ALTER TABLE availability_searches "
+        "ALTER COLUMN scheduling_duration_minutes SET NOT NULL, "
+        "ALTER COLUMN combination_fingerprint SET NOT NULL"
+    ))
+    connection.execute(text(
+        "ALTER TABLE bookings "
+        "ADD COLUMN IF NOT EXISTS pet_weight JSONB, "
+        "ADD COLUMN IF NOT EXISTS selected_addon_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+        "ADD COLUMN IF NOT EXISTS deposit_amount_cents INTEGER, "
+        "ADD COLUMN IF NOT EXISTS deposit_currency VARCHAR(3), "
+        "ADD COLUMN IF NOT EXISTS deposit_application VARCHAR(64), "
+        "ADD COLUMN IF NOT EXISTS deposit_note TEXT, "
+        "ADD COLUMN IF NOT EXISTS payment_amount_cents INTEGER, "
+        "ADD COLUMN IF NOT EXISTS payment_currency VARCHAR(3)"
+    ))
+    connection.execute(text(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE "
+        "conname = 'ck_bookings_deposit_amount') THEN ALTER TABLE bookings "
+        "ADD CONSTRAINT ck_bookings_deposit_amount CHECK "
+        "(deposit_amount_cents IS NULL OR deposit_amount_cents > 0); END IF; END $$"
+    ))
+    connection.execute(text(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE "
+        "conname = 'ck_bookings_payment_amount') THEN ALTER TABLE bookings "
+        "ADD CONSTRAINT ck_bookings_payment_amount CHECK "
+        "(payment_amount_cents IS NULL OR payment_amount_cents > 0); END IF; END $$"
+    ))
+
+
 MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0001_m2_merchant_and_booking_drafts", create_m2_schema),
     ("0002_m2_staff_and_availability", add_m2_availability_schema),
@@ -638,6 +690,7 @@ MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0008_m4_session_and_age_contract", add_m4_session_and_age_contract),
     ("0009_m4_public_merchant_profile", add_m4_public_merchant_profile),
     ("0010_grooming_service_configuration", add_grooming_service_configuration),
+    ("0011_grooming_booking_combinations", add_grooming_booking_combinations),
 )
 
 

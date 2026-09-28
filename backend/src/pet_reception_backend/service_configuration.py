@@ -195,6 +195,10 @@ def calculate_service_quote(
             total_max_cents=None,
             legacy_price_note=service.price_note,
             scheduling_duration_minutes=service.duration_minutes,
+            deposit_amount_cents=None,
+            deposit_currency=None,
+            deposit_application=None,
+            deposit_note=None,
             missing_for_quote=["service_pricing_configuration"],
             missing_for_availability=[],
             missing_for_booking=["service_pricing_configuration"],
@@ -352,6 +356,8 @@ def calculate_service_quote(
         and not missing_for_availability
         and not requires_assessment
     )
+    if configuration.deposit is None:
+        _append_unique(missing_for_booking, "deposit_configuration")
 
     return ServiceQuoteResult(
         merchant_id=merchant.id,
@@ -372,6 +378,14 @@ def calculate_service_quote(
         total_max_cents=total_maximum,
         legacy_price_note=service.price_note,
         scheduling_duration_minutes=scheduling_duration,
+        deposit_amount_cents=(
+            configuration.deposit.amount_cents if configuration.deposit else None
+        ),
+        deposit_currency=configuration.currency if configuration.deposit else None,
+        deposit_application=(
+            configuration.deposit.application if configuration.deposit else None
+        ),
+        deposit_note=configuration.deposit.note if configuration.deposit else None,
         missing_for_quote=missing_for_quote,
         missing_for_availability=missing_for_availability,
         missing_for_booking=missing_for_booking,

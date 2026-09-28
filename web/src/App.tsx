@@ -43,6 +43,25 @@ function formatBookingTime(value: string, timeZone: string) {
   }).format(new Date(value))
 }
 
+function formatMoney(amountCents: number, currency: string) {
+  return new Intl.NumberFormat('zh-CN', {
+    style: 'currency', currency,
+  }).format(amountCents / 100)
+}
+
+function quoteText(booking: BookingRecord) {
+  const quote = booking.service_quote
+  if (!quote?.currency || quote.total_min_cents === null) {
+    return quote?.legacy_price_note || '历史金额未记录'
+  }
+  const minimum = formatMoney(quote.total_min_cents, quote.currency)
+  if (quote.total_semantics === 'fixed') return minimum
+  if (quote.total_semantics === 'range' && quote.total_max_cents !== null) {
+    return `${minimum}–${formatMoney(quote.total_max_cents, quote.currency)}`
+  }
+  return `${minimum} 起`
+}
+
 function CustomerBookingPage({ bookingReference, accessToken }: { bookingReference: string; accessToken: string }) {
   const [state, setState] = useState<BookingLoadState>({ kind: 'loading' })
   const [paymentPending, setPaymentPending] = useState(false)
@@ -105,7 +124,7 @@ function CustomerBookingPage({ bookingReference, accessToken }: { bookingReferen
       <h1 className="booking-title">{booking.pet_name} 的服务安排</h1>
       <p className="lede">
         {isConfirmed
-          ? '后端已经记录本地模拟支付成功，以下是正式确认记录。'
+          ? '预约已确认，预约金已支付。以下金额不代表全部服务费用已经结清。'
           : isAwaitingPayment
             ? '该时段正在为您临时保留。完成本地模拟支付后才会生成正式确认编号。此页面不会采集银行卡信息。'
             : '支付保留已超时释放；请返回语音前台重新查询空档。'}
@@ -113,9 +132,11 @@ function CustomerBookingPage({ bookingReference, accessToken }: { bookingReferen
 
       {isAwaitingPayment && (
         <section className="payment-panel" aria-label="本地模拟支付">
-          <p>本地开发验证：模拟一次支付成功事件，不连接真实支付平台。</p>
+          <p>本地开发验证：模拟支付{booking.deposit_amount_cents && booking.deposit_currency
+            ? `预约金 ${formatMoney(booking.deposit_amount_cents, booking.deposit_currency)}`
+            : '预约金（旧版记录未保存金额）'}，不连接真实支付平台。</p>
           <button type="button" disabled={paymentPending} onClick={() => void pay()}>
-            {paymentPending ? '正在处理…' : '模拟支付成功'}
+            {paymentPending ? '正在处理…' : '模拟支付预约金'}
           </button>
           {paymentError && <p className="booking-error" role="alert">{paymentError}</p>}
         </section>
@@ -129,6 +150,17 @@ function CustomerBookingPage({ bookingReference, accessToken }: { bookingReferen
         <dl className="booking-details">
           <div><dt>商家</dt><dd>{booking.merchant_display_name}</dd></div>
           <div><dt>服务</dt><dd>{booking.service_name_zh}</dd></div>
+          <div><dt>服务报价</dt><dd>{quoteText(booking)}</dd></div>
+          {booking.service_quote?.line_items.filter((item) => item.kind === 'addon').map((item) => (
+            <div key={item.item_id}><dt>收费附加项</dt><dd>{item.display_name}</dd></div>
+          ))}
+          <div><dt>预约金</dt><dd>{booking.deposit_amount_cents && booking.deposit_currency
+            ? formatMoney(booking.deposit_amount_cents, booking.deposit_currency)
+            : '旧版记录未记录金额'}</dd></div>
+          {booking.deposit_note && <div><dt>预约金说明</dt><dd>{booking.deposit_note}</dd></div>}
+          {isConfirmed && booking.payment_amount_cents && booking.payment_currency && (
+            <div><dt>已付预约金</dt><dd>{formatMoney(booking.payment_amount_cents, booking.payment_currency)}</dd></div>
+          )}
           <div><dt>时间</dt><dd>{formatBookingTime(booking.starts_at, booking.merchant_time_zone)}</dd></div>
           <div><dt>服务人员</dt><dd>{booking.staff_display_name}</dd></div>
           <div><dt>客户</dt><dd>{booking.customer_name}</dd></div>

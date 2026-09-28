@@ -202,6 +202,7 @@ def create_app(
     def draft_result(
         draft: BookingDraft,
         context: VoiceRequestContext,
+        current_store: DataStore,
         changed_fields: list[DraftFieldName] | None = None,
     ) -> BookingDraftToolResult:
         missing_for_availability = [
@@ -225,12 +226,21 @@ def create_app(
         ]
         if draft.selected_candidate_id is None:
             missing_for_booking.append("selected_availability")
+        quote = current_store.quote_draft(context, draft)
+        if quote is not None and quote.service_kind is not None:
+            for field in quote.missing_for_availability:
+                if field not in missing_for_availability:
+                    missing_for_availability.append(field)
+            for field in quote.missing_for_booking:
+                if field not in missing_for_booking:
+                    missing_for_booking.append(field)
         return BookingDraftToolResult(
             draft=draft,
             context=context,
             changed_fields=changed_fields or [],
             missing_for_availability=missing_for_availability,
             missing_for_booking=missing_for_booking,
+            service_quote=quote,
         )
 
     def already_submitted_detail(error: BookingAlreadySubmittedError) -> dict:
@@ -300,7 +310,7 @@ def create_app(
             draft = current_store.get_or_create_draft(context)
         except MerchantNotFoundError as error:
             raise HTTPException(status_code=404, detail="merchant not found") from error
-        return draft_result(draft, context)
+        return draft_result(draft, context, current_store)
 
     @application.post(
         "/api/internal/voice/booking-sessions/start",
@@ -323,7 +333,7 @@ def create_app(
                 status_code=409,
                 detail={"code": "booking_session_start_conflict", "message": str(error)},
             ) from error
-        return draft_result(draft, context)
+        return draft_result(draft, context, current_store)
 
     @application.patch(
         "/api/internal/voice/booking-draft",
@@ -363,6 +373,11 @@ def create_app(
                 status_code=422,
                 detail={"code": "staff_not_qualified", "staff_id": str(error)},
             ) from error
+        except ServiceQuoteRejectedError as error:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": error.code, "reference": error.reference},
+            ) from error
         except BookingAlreadySubmittedError as error:
             raise HTTPException(
                 status_code=409,
@@ -370,7 +385,7 @@ def create_app(
             ) from error
         except MerchantNotFoundError as error:
             raise HTTPException(status_code=404, detail="merchant not found") from error
-        return draft_result(draft, context, changed_fields)
+        return draft_result(draft, context, current_store, changed_fields)
 
     @application.post(
         "/api/internal/voice/availability-searches",

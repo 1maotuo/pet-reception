@@ -104,6 +104,19 @@ class WeightTierConfiguration(BaseModel):
         return self
 
 
+class DepositConfiguration(BaseModel):
+    """Fixed demo deposit policy configured by the merchant catalog."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    amount_cents: int = Field(gt=0)
+    application: Literal[
+        "applied_to_service_total",
+        "application_unconfirmed",
+    ]
+    note: str | None = Field(default=None, max_length=500)
+
+
 class ServiceConfiguration(BaseModel):
     """Optional structured rules for one merchant service.
 
@@ -126,6 +139,7 @@ class ServiceConfiguration(BaseModel):
         "price_and_duration",
         "eligibility",
     ] = "not_used"
+    deposit: DepositConfiguration | None = None
     source: str = Field(min_length=1, max_length=200)
 
     @model_validator(mode="after")
@@ -154,6 +168,17 @@ class ServiceConfiguration(BaseModel):
                 "price_and_duration tiers must all configure duration_minutes"
             )
         self._validate_weight_tier_partition()
+        if self.deposit is not None:
+            known_prices = [self.base_price] if self.base_price is not None else [
+                tier.price for tier in self.weight_tiers
+            ]
+            known_minimums = [
+                price.amount_cents
+                for price in known_prices
+                if price is not None and price.amount_cents is not None
+            ]
+            if known_minimums and self.deposit.amount_cents > min(known_minimums):
+                raise ValueError("deposit cannot exceed a known base price minimum")
         return self
 
     def _validate_weight_tier_partition(self) -> None:
@@ -278,6 +303,13 @@ class ServiceQuoteResult(BaseModel):
     total_max_cents: int | None
     legacy_price_note: str
     scheduling_duration_minutes: int | None
+    deposit_amount_cents: int | None = None
+    deposit_currency: str | None = None
+    deposit_application: Literal[
+        "applied_to_service_total",
+        "application_unconfirmed",
+    ] | None = None
+    deposit_note: str | None = None
     missing_for_quote: list[str]
     missing_for_availability: list[str]
     missing_for_booking: list[str]
@@ -478,6 +510,8 @@ DraftFieldName = Literal[
     "preferred_time_of_day",
     "staff_preference_text",
     "staff_id",
+    "pet_weight",
+    "selected_addon_ids",
 ]
 
 DRAFT_MUTABLE_FIELDS: tuple[DraftFieldName, ...] = (
@@ -496,6 +530,8 @@ DRAFT_MUTABLE_FIELDS: tuple[DraftFieldName, ...] = (
     "preferred_time_of_day",
     "staff_preference_text",
     "staff_id",
+    "pet_weight",
+    "selected_addon_ids",
 )
 
 AGE_DRAFT_FIELDS = frozenset(
@@ -528,6 +564,22 @@ class BookingDraftPatch(BaseModel):
     ] | None = None
     staff_preference_text: str | None = Field(default=None, max_length=200)
     staff_id: str | None = Field(default=None, max_length=128)
+    pet_weight: QuoteWeightInput | None = None
+    selected_addon_ids: list[str] | None = Field(default=None, max_length=32)
+
+    @field_validator("selected_addon_ids")
+    @classmethod
+    def normalize_addon_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        normalized: list[str] = []
+        for raw in value:
+            addon_id = raw.strip()
+            if not addon_id:
+                raise ValueError("selected add-on ids cannot be blank")
+            if addon_id not in normalized:
+                normalized.append(addon_id)
+        return normalized
 
     @field_validator(
         "customer_name",
@@ -594,6 +646,8 @@ class BookingDraftPatch(BaseModel):
         age_inputs = provided.intersection(AGE_DRAFT_FIELDS)
         if len(age_inputs) > 1:
             raise ValueError("provide pet age through only one age representation")
+        if "selected_addon_ids" in self.clear_fields:
+            raise ValueError("clear selected add-ons with an explicit empty list")
         return self
 
     def changes(self) -> dict[DraftFieldName, object]:
@@ -647,6 +701,8 @@ class BookingDraft(BaseModel):
     ] | None
     staff_preference_text: str | None
     staff_id: str | None
+    pet_weight: QuoteWeightInput | None = None
+    selected_addon_ids: list[str] = Field(default_factory=list)
     selected_candidate_id: UUID | None
     pending_preparation_id: UUID | None
     booking_id: UUID | None
@@ -660,6 +716,7 @@ class BookingDraftToolResult(BaseModel):
     changed_fields: list[DraftFieldName] = Field(default_factory=list)
     missing_for_availability: list[str]
     missing_for_booking: list[str]
+    service_quote: ServiceQuoteResult | None = None
 
 
 class StartBookingSessionRequest(BaseModel):
@@ -710,6 +767,7 @@ class AvailabilitySearchResult(BaseModel):
         "flexible",
     ] | None
     staff_id: str | None
+    scheduling_duration_minutes: int
     merchant_time_zone: str
     candidates: list[AvailabilityCandidate]
     alternative_dates: list[AlternativeAvailabilityDate]
@@ -765,6 +823,9 @@ class BookingSummary(BaseModel):
     pet_age_text: str | None = None
     pet_care_notes: str | None
     need_description: str | None
+    pet_weight: QuoteWeightInput | None = None
+    selected_addon_ids: list[str] = Field(default_factory=list)
+    service_quote: ServiceQuoteResult | None = None
     source: Literal["server_booking_snapshot"] = "server_booking_snapshot"
 
 
@@ -809,6 +870,9 @@ class BookingRecord(BaseModel):
     pet_age_text: str | None
     pet_care_notes: str | None
     need_description: str | None
+    pet_weight: QuoteWeightInput | None = None
+    selected_addon_ids: list[str] = Field(default_factory=list)
+    service_quote: ServiceQuoteResult | None = None
     starts_at: datetime
     ends_at: datetime
     merchant_time_zone: str
@@ -818,6 +882,15 @@ class BookingRecord(BaseModel):
     paid_at: datetime | None
     payment_expired_at: datetime | None
     payment_method: str | None
+    deposit_amount_cents: int | None = None
+    deposit_currency: str | None = None
+    deposit_application: Literal[
+        "applied_to_service_total",
+        "application_unconfirmed",
+    ] | None = None
+    deposit_note: str | None = None
+    payment_amount_cents: int | None = None
+    payment_currency: str | None = None
     status: Literal["awaiting_payment", "confirmed", "payment_expired"]
     created_at: datetime
 

@@ -84,6 +84,7 @@
           }
         ],
         "weight_usage": "price_only",
+        "deposit": {"amount_cents": 2000, "application": "applied_to_service_total", "note": "仅用于自动测试的合成预约金"},
         "source": "synthetic-test-pricing:dog-bath"
       }
     },
@@ -142,6 +143,7 @@
           }
         ],
         "weight_usage": "price_only",
+        "deposit": {"amount_cents": 3000, "application": "applied_to_service_total", "note": "仅用于自动测试的合成预约金"},
         "source": "synthetic-test-pricing:dog-haircut"
       }
     },
@@ -176,6 +178,7 @@
           "maximum_amount_cents": 9000
         },
         "weight_usage": "not_used",
+        "deposit": {"amount_cents": 2500, "application": "application_unconfirmed", "note": "仅用于自动测试；抵扣规则待确认"},
         "source": "synthetic-test-pricing:cat-groom"
       }
     },
@@ -191,9 +194,38 @@
         "currency": "USD",
         "base_price": {"semantics": "fixed", "amount_cents": 1800},
         "weight_usage": "not_used",
+        "deposit": {"amount_cents": 500, "application": "applied_to_service_total", "note": "仅用于自动测试的合成预约金"},
         "source": "synthetic-test-pricing:nail-trim"
       }
     }
   ],
+  "scheduling": {
+    "slot_interval_minutes": 30,
+    "candidate_limit": 8,
+    "alternative_days": 7,
+    "service_buffers": [
+      {"service_id": "synthetic-dog-bath", "buffer_before_minutes": 0, "buffer_after_minutes": 0},
+      {"service_id": "synthetic-dog-haircut", "buffer_before_minutes": 0, "buffer_after_minutes": 0},
+      {"service_id": "synthetic-cat-groom", "buffer_before_minutes": 0, "buffer_after_minutes": 0},
+      {"service_id": "synthetic-nail-trim", "buffer_before_minutes": 0, "buffer_after_minutes": 0}
+    ],
+    "staff": [
+      {
+        "id": "synthetic-staff-all",
+        "display_name": "Synthetic Test Staff",
+        "service_ids": ["synthetic-dog-bath", "synthetic-dog-haircut", "synthetic-cat-groom", "synthetic-nail-trim"],
+        "weekly_hours": [
+          {"weekday": 0, "start_time": "09:00", "end_time": "17:00"},
+          {"weekday": 1, "start_time": "09:00", "end_time": "17:00"},
+          {"weekday": 2, "start_time": "09:00", "end_time": "17:00"},
+          {"weekday": 3, "start_time": "09:00", "end_time": "17:00"},
+          {"weekday": 4, "start_time": "09:00", "end_time": "17:00"},
+          {"weekday": 5, "start_time": "09:00", "end_time": "17:00"},
+          {"weekday": 6, "start_time": "09:00", "end_time": "17:00"}
+        ],
+        "source": "synthetic-test-schedule"
+      }
+    ]
+  },
   "source": "synthetic-test-catalog:merchant"
 }
