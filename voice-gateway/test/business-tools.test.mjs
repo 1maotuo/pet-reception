@@ -34,6 +34,34 @@ function draft(overrides = {}) {
   }
 }
 
+function availability(overrides = {}) {
+  return {
+    context: {
+      merchant_id: 'demo-grooming-001',
+      owner_id: context.ownerId,
+      voice_session_id: context.sessionId,
+      turn_id: context.turnId,
+    },
+    search: {
+      id: 'search-id',
+      draft_id: 'draft-id',
+      draft_version: 2,
+      availability_revision: 1,
+      schedule_revision: 1,
+      service_id: 'demo-bath',
+      staff_id: null,
+      preferred_date: '2026-10-06',
+      preferred_time_of_day: null,
+      status: 'available',
+      is_current: true,
+      candidates: [],
+      alternative_dates: [],
+      created_at: '2026-09-19T18:00:00Z',
+      ...overrides,
+    },
+  }
+}
+
 function summary() {
   return {
     merchant_id: 'demo-grooming-001',
@@ -398,17 +426,11 @@ test('same-turn read after a draft change re-queries current availability', asyn
     },
     searchAvailability: async () => {
       searchCalls += 1
-      return {
-        search: {
-          draft_id: 'draft-id',
-          draft_version: state.version,
-          availability_revision: state.availability_revision,
-          preferred_date: state.preferred_date,
-          is_current: true,
-          status: 'available',
-          candidates: [],
-        },
-      }
+      return availability({
+        draft_version: state.version,
+        availability_revision: state.availability_revision,
+        preferred_date: state.preferred_date,
+      })
     },
   }
   const coordinator = new MerchantCoordinator({ toolClient })
@@ -424,6 +446,156 @@ test('same-turn read after a draft change re-queries current availability', asyn
   assert.equal(first.output.availability.preferred_date, '2026-10-06')
   assert.equal(second.output.availability.preferred_date, '2026-10-07')
   assert.equal(searchCalls, 2)
+})
+
+test('asking an old date again performs a fresh current availability search', async () => {
+  let state = draft({ preferred_date: '2026-09-21' })
+  let searchCalls = 0
+  const coordinator = new MerchantCoordinator({
+    toolClient: {
+      getBookingDraft: async () => ({
+        draft: { ...state },
+        missing_for_availability: [],
+        missing_for_booking: ['selected_availability'],
+      }),
+      updateBookingDraft: async (_received, patch) => {
+        state = {
+          ...state,
+          ...Object.fromEntries(Object.entries(patch).filter(([key]) => key !== 'expected_version')),
+          version: state.version + 1,
+          availability_revision: state.availability_revision + 1,
+        }
+        return {
+          draft: { ...state },
+          changed_fields: ['preferred_date'],
+          missing_for_availability: [],
+          missing_for_booking: ['selected_availability'],
+        }
+      },
+      searchAvailability: async () => {
+        searchCalls += 1
+        return availability({
+          draft_version: state.version,
+          availability_revision: state.availability_revision,
+          preferred_date: state.preferred_date,
+        })
+      },
+    },
+  })
+
+  await coordinator.runBusinessTool('search_availability', {}, context)
+  await coordinator.runBusinessTool(
+    'update_booking_draft',
+    { preferred_date: '2026-09-26', search_availability_after_update: true },
+    { ...context, turnId: 'turn-date-26', turnGeneration: 1 },
+  )
+  const backTo21 = await coordinator.runBusinessTool(
+    'update_booking_draft',
+    { preferred_date: '2026-09-21', search_availability_after_update: true },
+    { ...context, turnId: 'turn-date-21-again', turnGeneration: 2 },
+  )
+
+  assert.equal(searchCalls, 3)
+  assert.equal(backTo21.output.current_state.availability.belongs_to_current_draft, true)
+  assert.equal(backTo21.output.availability.preferred_date, '2026-09-21')
+})
+
+test('rapid partial date corrections inherit the latest explicit time preference', async () => {
+  let activeGeneration = 1
+  let state = draft({ preferred_date: null, preferred_time_of_day: null })
+  let releaseOldSearch
+  let markOldSearchStarted
+  const oldSearchStarted = new Promise((resolve) => { markOldSearchStarted = resolve })
+  const oldSearchGate = new Promise((resolve) => { releaseOldSearch = resolve })
+  const patches = []
+  const searches = []
+  const coordinator = new MerchantCoordinator({
+    toolClient: {
+      getBookingDraft: async () => ({
+        draft: { ...state },
+        missing_for_availability: state.preferred_date ? [] : ['preferred_date'],
+        missing_for_booking: ['customer_name', 'contact_phone', 'pet_name', 'selected_availability'],
+      }),
+      updateBookingDraft: async (_received, patch) => {
+        patches.push({ ...patch })
+        const changed = ['preferred_date', 'preferred_time_of_day'].filter(
+          (field) => Object.hasOwn(patch, field) && state[field] !== patch[field],
+        )
+        state = {
+          ...state,
+          ...Object.fromEntries(Object.entries(patch).filter(([key]) => key !== 'expected_version')),
+          version: state.version + 1,
+          availability_revision: state.availability_revision + 1,
+        }
+        return {
+          draft: { ...state },
+          changed_fields: changed,
+          missing_for_availability: [],
+          missing_for_booking: ['customer_name', 'contact_phone', 'pet_name', 'selected_availability'],
+        }
+      },
+      searchAvailability: async () => {
+        const snapshot = { ...state }
+        searches.push({ date: snapshot.preferred_date, time: snapshot.preferred_time_of_day })
+        if (snapshot.preferred_date === '2026-09-25') {
+          markOldSearchStarted()
+          await oldSearchGate
+        }
+        return availability({
+          draft_version: snapshot.version,
+          availability_revision: snapshot.availability_revision,
+          preferred_date: snapshot.preferred_date,
+          preferred_time_of_day: snapshot.preferred_time_of_day,
+        })
+      },
+    },
+  })
+  const turn = (generation) => ({
+    ...context,
+    turnId: `turn-intent-${generation}`,
+    turnGeneration: generation,
+    isActive: () => activeGeneration === generation,
+  })
+
+  const first = coordinator.runBusinessTool(
+    'update_booking_draft',
+    {
+      preferred_date: '2026-09-25',
+      preferred_time_of_day: 'afternoon',
+      search_availability_after_update: true,
+    },
+    turn(1),
+  )
+  await oldSearchStarted
+  activeGeneration = 2
+  const second = coordinator.runBusinessTool(
+    'update_booking_draft',
+    {
+      preferred_date: '2026-09-26',
+      preferred_time_of_day: 'morning',
+      search_availability_after_update: true,
+    },
+    turn(2),
+  )
+  activeGeneration = 3
+  const third = coordinator.runBusinessTool(
+    'update_booking_draft',
+    { preferred_date: '2026-09-27', search_availability_after_update: true },
+    turn(3),
+  )
+  releaseOldSearch()
+
+  await first
+  await assert.rejects(second, (error) => error.code === 'stale_business_turn')
+  const final = await third
+
+  assert.equal(patches.at(-1).preferred_date, '2026-09-27')
+  assert.equal(patches.at(-1).preferred_time_of_day, 'morning')
+  assert.deepEqual(searches.at(-1), { date: '2026-09-27', time: 'morning' })
+  assert.equal(final.output.availability.preferred_date, '2026-09-27')
+  assert.equal(final.output.availability.preferred_time_of_day, 'morning')
+  const latest = coordinator.currentAvailability.get(`${context.ownerId}\u0000${context.sessionId}`)
+  assert.equal(latest.preferred_date, '2026-09-27')
 })
 
 test('draft update can continue directly to availability without a user nudge', async () => {
@@ -445,7 +617,11 @@ test('draft update can continue directly to availability without a user nudge', 
     },
     searchAvailability: async (_received, body) => {
       calls.push(['search', body])
-      return { search: { preferred_date: '2026-10-07', status: 'available' } }
+      return availability({
+        draft_version: 3,
+        availability_revision: 2,
+        preferred_date: '2026-10-07',
+      })
     },
   }
   const result = await new MerchantCoordinator({ toolClient }).runBusinessTool(
@@ -492,7 +668,7 @@ test('a saved draft remains truthful when the chained availability read fails', 
   assert.equal(result.output.status, 'partial_success')
   assert.equal(result.output.effect.applied, true)
   assert.equal(result.output.effect.availability_checked, false)
-  assert.equal(result.output.next_step.type, 'retry_availability')
+  assert.equal(result.output.next_step.action, 'retry_availability')
   assert.equal(JSON.stringify(result.output).includes('http_503'), false)
 })
 
@@ -501,17 +677,11 @@ test('alternative-date results require a concrete re-query before prepare', asyn
   const coordinator = new MerchantCoordinator({
     toolClient: {
       getBookingDraft: async () => ({ draft: draft() }),
-      searchAvailability: async () => ({
-        search: {
-          draft_id: 'draft-id',
-          draft_version: 2,
-          availability_revision: 1,
-          status: 'no_availability',
-          preferred_date: '2026-09-20',
-          is_current: true,
-          candidates: [],
-          alternative_dates: [{ date: '2026-09-22' }],
-        },
+      searchAvailability: async () => availability({
+        status: 'no_availability',
+        preferred_date: '2026-10-06',
+        candidates: [],
+        alternative_dates: [{ date: '2026-10-07' }],
       }),
       prepareBooking: async () => {
         prepareCalls += 1
@@ -521,7 +691,7 @@ test('alternative-date results require a concrete re-query before prepare', asyn
   })
 
   const searched = await coordinator.runBusinessTool('search_availability', {}, context)
-  assert.equal(searched.output.next_step.type, 'present_alternative_dates')
+  assert.equal(searched.output.next_step.action, 'present_alternative_dates')
   const prepared = await coordinator.runBusinessTool(
     'prepare_booking',
     { candidate_id: 'invented-candidate' },
@@ -539,17 +709,8 @@ test('prepare accepts only a candidate from the current concrete search', async 
   const coordinator = new MerchantCoordinator({
     toolClient: {
       getBookingDraft: async () => ({ draft: draft() }),
-      searchAvailability: async () => ({
-        search: {
-          draft_id: 'draft-id',
-          draft_version: 2,
-          availability_revision: 1,
-          status: 'available',
-          is_current: true,
-          preferred_date: '2026-10-06',
-          candidates: [{ id: candidateId }],
-          alternative_dates: [],
-        },
+      searchAvailability: async () => availability({
+        candidates: [{ id: candidateId }],
       }),
       prepareBooking: async () => {
         prepareCalls += 1
@@ -759,7 +920,8 @@ test('booking status is recoverable after coordinator restart and cards match pe
     { ...context, turnId: 'status-after-restart' },
   )
   assert.equal(confirmed.output.status, 'confirmed')
-  assert.match(confirmed.clientPresentation.content, /预约已正式确认/)
+  assert.match(confirmed.clientPresentation.content, /预约已确认，预约金已支付/)
+  assert.match(confirmed.clientPresentation.content, /不表示全部服务费用已结清/)
   assert.doesNotMatch(confirmed.clientPresentation.content, /当前为等待本地模拟支付/)
 
   status = 'payment_expired'
@@ -1201,6 +1363,10 @@ test('a spoken wait preamble still receives one post-tool continuation with timi
     'response-with-spoken-wait',
     { suppressResponse: true },
   )
+  await handler.finishToolResponse(
+    'response-with-spoken-wait',
+    { suppressResponse: true },
+  )
 
   assert.equal(continuations, 1)
   assert.equal(outputs[0][1].createResponse, false)
@@ -1276,4 +1442,57 @@ test('an interrupted summary confirmation replays through the controlled speak p
       },
     },
   ])
+})
+
+test('quote_service is read-only and reports only the current quote goal', async () => {
+  const calls = []
+  const coordinator = new MerchantCoordinator({
+    toolClient: {
+      quoteService: async (_context, body) => {
+        calls.push(body)
+        return {
+          quote: {
+            can_quote: false,
+            missing_for_quote: ['weight'],
+            missing_for_booking: ['weight', 'selected_availability'],
+            service_id: 'synthetic-dog-bath',
+          },
+        }
+      },
+    },
+  })
+  const result = await coordinator.runBusinessTool('quote_service', {
+    service_id: 'synthetic-dog-bath',
+    pet_species: '犬',
+  }, context)
+
+  assert.deepEqual(calls, [{
+    service_id: 'synthetic-dog-bath', pet_species: '犬', selected_addon_ids: [],
+  }])
+  assert.equal(result.output.current_goal, 'quote_service')
+  assert.deepEqual(result.output.missing_for_current_goal, ['weight'])
+  assert.equal(result.output.effect.draft_mutated, false)
+})
+
+test('controlled summary rejects a wrong amount or missing paid add-on', () => {
+  const priced = {
+    ...summary(),
+    service_quote: {
+      total_semantics: 'fixed',
+      total_min_cents: 11700,
+      total_max_cents: 11700,
+      currency: 'USD',
+      deposit_amount_cents: 3000,
+      deposit_currency: 'USD',
+      line_items: [{ kind: 'addon', display_name: '刷牙' }],
+    },
+  }
+  const correct = completeSummaryTranscript().replace(
+    '备注：',
+    '收费附加项目：刷牙。服务报价117美元。本次应付预约金30美元。备注：',
+  )
+  assert.equal(presentationTranscriptMatches(priced, correct), true)
+  assert.equal(presentationTranscriptMatches(priced, correct.replace('117美元', '118美元')), false)
+  assert.equal(presentationTranscriptMatches(priced, correct.replace('收费附加项目：刷牙。', '')), false)
+  assert.equal(presentationTranscriptMatches(priced, correct.replace('30美元', '20美元')), false)
 })

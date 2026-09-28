@@ -397,7 +397,9 @@ export function frontendTools(agentContext = {}) {
   preferred_time_of_day: { type: 'string', enum: ['morning', 'afternoon', 'evening', 'flexible'], description: '上午、下午、晚上或时间灵活。' },
   staff_preference_text: { type: 'string', description: '用户原话中的员工偏好。' },
   staff_id: { type: 'string', description: '只能使用 get_merchant_info 返回的员工 ID。' },
-  clear_fields: { type: 'array', items: { type: 'string', enum: ['customer_name', 'contact_phone', 'pet_name', 'pet_species', 'pet_breed', 'pet_age_years', 'pet_age_months', 'pet_age_text', 'pet_care_notes', 'need_description', 'service_id', 'preferred_date', 'preferred_time_of_day', 'staff_preference_text', 'staff_id'] }, uniqueItems: true, description: '仅在用户明确撤销或纠正字段时使用。' },
+  pet_weight: { type: 'object', properties: { value: { type: 'number', exclusiveMinimum: 0 }, minimum: { type: 'number', exclusiveMinimum: 0 }, maximum: { type: 'number', exclusiveMinimum: 0 }, unit: { type: 'string', enum: ['lb', 'kg'] }, estimated: { type: 'boolean' } }, required: ['unit'], additionalProperties: false, description: '用户明确提供的体重或体重范围；必须保留单位。' },
+  selected_addon_ids: { type: 'array', items: { type: 'string' }, uniqueItems: true, description: '用户明确选择的附加项目 ID；空数组表示明确清空。' },
+  clear_fields: { type: 'array', items: { type: 'string', enum: ['customer_name', 'contact_phone', 'pet_name', 'pet_species', 'pet_breed', 'pet_age_years', 'pet_age_months', 'pet_age_text', 'pet_care_notes', 'need_description', 'service_id', 'preferred_date', 'preferred_time_of_day', 'staff_preference_text', 'staff_id', 'pet_weight'] }, uniqueItems: true, description: '仅在用户明确撤销或纠正字段时使用；附加项目用 selected_addon_ids=[] 清空。' },
   search_availability_after_update: { type: 'boolean', description: '用户要求查询时间，或从替代日期中选定一天时设为 true；网关将在批量更新成功后立即查询具体候选，避免额外等待轮次。' },
 }
 
@@ -408,6 +410,14 @@ const PET_RECEPTION_BUSINESS_TOOLS = [
       name: 'get_merchant_info',
       description: '读取服务端绑定的当前商家公开资料、商家当地日期、服务明细、适用宠物、推荐边界、演示价格和可服务员工。商家和会话由网关注入，不接受相关参数。',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'quote_service',
+      description: '按本轮明确给出的服务、物种、体重和附加项目只读计算组合报价与排班时长。不读取或修改预约草稿，不创建候选、占位或预约。',
+      parameters: { type: 'object', properties: { service_id: { type: 'string' }, pet_species: { type: 'string' }, weight: PET_RECEPTION_DRAFT_PROPERTIES.pet_weight, selected_addon_ids: PET_RECEPTION_DRAFT_PROPERTIES.selected_addon_ids }, required: ['service_id'], additionalProperties: false },
     },
   },
   {
@@ -719,6 +729,7 @@ function configuredPetReceptionToolAllowlist() {
       original: `function mergeInputParts(...groups) {`,
       replacement: `const PET_RECEPTION_BUSINESS_TOOL_NAMES = new Set([
   'get_merchant_info',
+  'quote_service',
   'update_booking_draft',
   'search_availability',
   'prepare_booking',
@@ -1035,6 +1046,53 @@ function mergeInputParts(...groups) {`,
         )
       }
       await this.completeDeferredToolResponse(deferred)`,
+    },
+  ])
+
+  patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'frontend-tools.mjs'), [
+    {
+      label: 'grooming quote weight and add-on draft schema',
+      alreadyApplied: `selected_addon_ids: { type: 'array'`,
+      original: `  staff_id: { type: 'string', description: '只能使用 get_merchant_info 返回的员工 ID。' },\n  clear_fields:`,
+      replacement: `  staff_id: { type: 'string', description: '只能使用 get_merchant_info 返回的员工 ID。' },
+  pet_weight: { type: 'object', properties: { value: { type: 'number', exclusiveMinimum: 0 }, minimum: { type: 'number', exclusiveMinimum: 0 }, maximum: { type: 'number', exclusiveMinimum: 0 }, unit: { type: 'string', enum: ['lb', 'kg'] }, estimated: { type: 'boolean' } }, required: ['unit'], additionalProperties: false, description: '用户明确提供的体重或体重范围；必须保留单位。' },
+  selected_addon_ids: { type: 'array', items: { type: 'string' }, uniqueItems: true, description: '用户明确选择的附加项目 ID；空数组表示明确清空。' },
+  clear_fields:`,
+    },
+    {
+      label: 'grooming read-only quote tool declaration',
+      alreadyApplied: `name: 'quote_service',`,
+      original: `  {
+    type: 'function',
+    function: {
+      name: 'update_booking_draft',`,
+      replacement: `  {
+    type: 'function',
+    function: {
+      name: 'quote_service',
+      description: '按本轮明确给出的服务、物种、体重和附加项目只读计算组合报价与排班时长。不读取或修改预约草稿，不创建候选、占位或预约。',
+      parameters: { type: 'object', properties: { service_id: { type: 'string' }, pet_species: { type: 'string' }, weight: PET_RECEPTION_DRAFT_PROPERTIES.pet_weight, selected_addon_ids: PET_RECEPTION_DRAFT_PROPERTIES.selected_addon_ids }, required: ['service_id'], additionalProperties: false },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_booking_draft',`,
+    },
+    {
+      label: 'grooming weight is clearable but add-ons use explicit empty set',
+      alreadyApplied: `'staff_id', 'pet_weight'] }, uniqueItems: true`,
+      original: `'staff_id'] }, uniqueItems: true`,
+      replacement: `'staff_id', 'pet_weight'] }, uniqueItems: true`,
+    },
+  ])
+
+  patchFile(resolve(packageRoot, 'server', 'src', 'voice', 'tools', 'tool-call-handler.mjs'), [
+    {
+      label: 'grooming quote runtime business tool name',
+      alreadyApplied: `'get_merchant_info',\n  'quote_service',`,
+      original: `'get_merchant_info',\n  'update_booking_draft',`,
+      replacement: `'get_merchant_info',\n  'quote_service',\n  'update_booking_draft',`,
     },
   ])
 

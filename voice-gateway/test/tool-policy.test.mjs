@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url)
 const qwenRoot = dirname(require.resolve('qwen-audio-agent/package.json'))
 const allowedTools = [
   'get_merchant_info',
+  'quote_service',
   'update_booking_draft',
   'search_availability',
   'prepare_booking',
@@ -15,7 +16,7 @@ const allowedTools = [
   'get_booking_status',
 ]
 
-test('actual Qwen session exposes only the six bounded M4 business tools', async () => {
+test('actual Qwen session exposes only the seven bounded grooming business tools', async () => {
   process.env.PET_RECEPTION_FRONTEND_TOOL_ALLOWLIST = allowedTools.join(',')
   const providerModule = await import(pathToFileURL(resolve(
     qwenRoot,
@@ -35,6 +36,7 @@ test('actual Qwen session exposes only the six bounded M4 business tools', async
     allowedTools,
   )
   const update = session.tools.find((tool) => tool.function.name === 'update_booking_draft')
+  const quote = session.tools.find((tool) => tool.function.name === 'quote_service')
   const confirm = session.tools.find((tool) => tool.function.name === 'confirm_booking')
   assert.match(update.function.description, /一次批量写入/)
   assert.equal(update.function.parameters.additionalProperties, false)
@@ -45,6 +47,10 @@ test('actual Qwen session exposes only the six bounded M4 business tools', async
     'boolean',
   )
   assert.equal(update.function.parameters.properties.pet_age_months.type, 'integer')
+  assert.equal(update.function.parameters.properties.pet_weight.type, 'object')
+  assert.equal(update.function.parameters.properties.selected_addon_ids.type, 'array')
+  assert.equal(quote.function.parameters.additionalProperties, false)
+  assert.match(quote.function.description, /只读/)
   assert.match(update.function.description, /用户选择替代日期/)
   const merchantInfo = session.tools.find((tool) => tool.function.name === 'get_merchant_info')
   assert.match(merchantInfo.function.description, /商家当地日期/)

@@ -11,6 +11,7 @@ const DRAFT_FIELDS = new Set([
   'customer_name', 'contact_phone', 'pet_name', 'pet_species', 'pet_breed',
   'pet_age_years', 'pet_age_months', 'pet_age_text', 'pet_care_notes', 'need_description', 'service_id',
   'preferred_date', 'preferred_time_of_day', 'staff_preference_text', 'staff_id',
+  'pet_weight', 'selected_addon_ids',
 ])
 const STATEFUL_TOOL_NAMES = new Set([
   'update_booking_draft',
@@ -23,9 +24,19 @@ const COMPLETED_DEDUPE_TOOL_NAMES = new Set([
   'prepare_booking',
   'confirm_booking',
 ])
+const AVAILABILITY_INTENT_FIELDS = Object.freeze([
+  'service_id',
+  'pet_species',
+  'pet_weight',
+  'selected_addon_ids',
+  'preferred_date',
+  'preferred_time_of_day',
+  'staff_preference_text',
+])
 
 export const BUSINESS_TOOL_NAMES = Object.freeze([
   'get_merchant_info',
+  'quote_service',
   'update_booking_draft',
   'search_availability',
   'prepare_booking',
@@ -73,6 +84,66 @@ function stableJson(value) {
     )).join(',')}}`
   }
   return JSON.stringify(value)
+}
+
+function normalizedStaffText(value) {
+  return String(value || '').normalize('NFKC').trim().toLocaleLowerCase('en-US')
+}
+
+function staffNameAppearsExactly(text, displayName) {
+  const normalizedText = normalizedStaffText(text)
+  const normalizedName = normalizedStaffText(displayName)
+  if (!normalizedText || !normalizedName) return false
+  if (normalizedText === normalizedName) return true
+  const escaped = normalizedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, 'i').test(normalizedText)
+}
+
+function publicStaff(staff, services) {
+  const names = new Map((services || []).map((service) => [service.id, service.name_zh]))
+  return (staff || []).map((member) => ({
+    display_name: member.display_name,
+    public_description: member.public_intro || '公开介绍未提供',
+    qualification_facts: {
+      services: (member.service_ids || []).map((serviceId) => names.get(serviceId)).filter(Boolean),
+      specialties: member.specialties || [],
+    },
+    resolution_status: 'catalog_entry',
+  }))
+}
+
+function resolveStaffUpdate(args, current, merchantResult) {
+  const hasText = Object.hasOwn(args, 'staff_preference_text')
+  const hasId = Object.hasOwn(args, 'staff_id')
+  if (!hasText && !hasId) return { args, resolution: undefined }
+
+  const catalog = merchantResult?.merchant?.staff || []
+  if (hasText) {
+    const text = String(args.staff_preference_text || '').trim()
+    const matches = catalog.filter((member) => staffNameAppearsExactly(text, member.display_name))
+    if (matches.length === 1) {
+      return {
+        args: { ...args, staff_preference_text: text, staff_id: matches[0].id },
+        resolution: { resolution: 'resolved', display_name: matches[0].display_name },
+      }
+    }
+    const unresolved = { ...args, staff_preference_text: text }
+    delete unresolved.staff_id
+    return { args: unresolved, resolution: { resolution: 'unresolved' } }
+  }
+
+  const currentStaffId = String(current?.draft?.staff_id || '')
+  if (currentStaffId && currentStaffId === String(args.staff_id || '')) {
+    const member = catalog.find((item) => String(item.id) === currentStaffId)
+    return {
+      args,
+      resolution: {
+        resolution: 'resolved',
+        ...(member?.display_name ? { display_name: member.display_name } : {}),
+      },
+    }
+  }
+  return { args: null, resolution: { resolution: 'unresolved' } }
 }
 
 function boundedMapSet(map, key, value, limit = 500) {
@@ -200,7 +271,7 @@ export class MerchantToolClient {
     }
   }
 
-  async request(path, { method = 'GET', body, context, headers = {}, operation }) {
+  async request(path, { method = 'GET', body, context, headers = {}, operation, readOnly = false }) {
     let response
     try {
       response = await this.fetch(`${this.backendBaseUrl}${path}`, {
@@ -210,7 +281,7 @@ export class MerchantToolClient {
         signal: requestSignal(context.signal, this.requestTimeoutMs),
       })
     } catch (error) {
-      if (method !== 'GET' && writeOutcomeMayBeUnknown(error)) {
+      if (method !== 'GET' && !readOnly && writeOutcomeMayBeUnknown(error)) {
         throw new BusinessToolResultUnknownError(operation, error)
       }
       throw error
@@ -219,7 +290,7 @@ export class MerchantToolClient {
     try {
       payload = await response.json()
     } catch (error) {
-      if (response.ok && method !== 'GET') {
+      if (response.ok && method !== 'GET' && !readOnly) {
         throw new BusinessToolResultUnknownError(operation, error)
       }
       if (response.ok) throw error
@@ -233,7 +304,7 @@ export class MerchantToolClient {
       )
     }
     if (payload === null || typeof payload !== 'object') {
-      if (method !== 'GET') {
+      if (method !== 'GET' && !readOnly) {
         throw new BusinessToolResultUnknownError(
           operation,
           new Error('successful write response did not contain a JSON object'),
@@ -285,6 +356,12 @@ export class MerchantToolClient {
     })
   }
 
+  quoteService(context, body) {
+    return this.request('/api/internal/voice/service-quotes', {
+      method: 'POST', context, body, operation: 'service quote', readOnly: true,
+    })
+  }
+
   getBookingPreparation(context, preparationId) {
     return this.request(
       `/api/internal/voice/booking-preparations/${encodeURIComponent(preparationId)}`,
@@ -328,6 +405,7 @@ export class MerchantToolClient {
 
 function merchantFacts(result) {
   const merchant = result.merchant
+  const staff = publicStaff(merchant.staff, merchant.services)
   return {
     status: 'ok',
     current_state: {
@@ -338,7 +416,7 @@ function merchantFacts(result) {
       },
     },
     effect: { type: 'merchant_information_read', applied: true },
-    next_step: { type: 'answer_customer_question' },
+    next_step: { action: 'answer_customer_question', type: 'answer_customer_question' },
     type: 'trusted_merchant_public_info',
     merchant: {
       id: merchant.id,
@@ -352,7 +430,7 @@ function merchantFacts(result) {
       local_datetime: result.merchant_local_datetime,
       grooming_policy: merchant.grooming_policy || null,
       business_hours: merchant.business_hours || null,
-      staff: merchant.staff || [],
+      staff,
       services: merchant.services.map((service) => ({
         id: service.id,
         name_zh: service.name_zh,
@@ -363,6 +441,7 @@ function merchantFacts(result) {
         recommended_for: service.recommended_for || [],
         assessment_required_for: service.assessment_required_for || [],
         not_included: service.not_included || [],
+        combination_options: service.combination_options || null,
         source: service.source || merchant.source,
       })),
     },
@@ -410,7 +489,7 @@ function customerPagePresentation(result) {
   const credential = result.customer_credential
   if (!credential?.credential_url) return null
   const statusLine = result.status === 'confirmed'
-    ? `预约已正式确认${result.booking?.confirmation_code ? `；确认码：${result.booking.confirmation_code}` : ''}。`
+    ? `预约已确认，预约金已支付${result.booking?.confirmation_code ? `；确认码：${result.booking.confirmation_code}` : ''}。这不表示全部服务费用已结清。`
     : result.status === 'payment_expired'
       ? '付款占位已过期；没有形成正式预约，请重新查询可用时间。'
       : '当前为等待本地模拟支付；完成前不是正式确认。'
@@ -443,6 +522,34 @@ function draftPatch(args, expectedVersion) {
   return patch
 }
 
+function quoteReceipt(result) {
+  const quote = result.quote
+  const missing = quote.missing_for_quote || []
+  return {
+    status: quote.can_quote ? 'ok' : 'needs_input',
+    current_goal: 'quote_service',
+    ready_for_current_goal: quote.can_quote,
+    missing_for_current_goal: missing,
+    missing_for_booking_later: quote.missing_for_booking || [],
+    current_state: { quote },
+    effect: { type: 'service_quote_read', applied: true, draft_mutated: false },
+    next_step: missing.length
+      ? { action: 'ask_one_field', type: 'ask_one_field', field: missing[0], for_goal: 'quote_service' }
+      : { action: 'answer_quote', type: 'answer_quote', for_goal: 'quote_service' },
+    quote,
+    boundary: '本结果只读，不表示已选择服务、占位或创建预约。',
+  }
+}
+
+function moneySpeech(cents, currency) {
+  if (!Number.isInteger(cents) || !currency) return ''
+  const amount = (cents / 100).toLocaleString('zh-CN', {
+    minimumFractionDigits: cents % 100 ? 2 : 0,
+    maximumFractionDigits: 2,
+  })
+  return currency === 'USD' ? `${amount}美元` : `${currency} ${amount}`
+}
+
 function summarySpeech(summary) {
   const date = new Intl.DateTimeFormat('zh-CN', {
     timeZone: summary.merchant_time_zone,
@@ -454,11 +561,30 @@ function summarySpeech(summary) {
   }).format(new Date(summary.starts_at))
   const notes = [summary.pet_care_notes, summary.need_description].filter(Boolean).join('；')
   const age = summary.pet_age_text ? `，年龄${summary.pet_age_text}` : ''
+  const quote = summary.service_quote
+  const paidAddons = (quote?.line_items || []).filter((item) => item.kind === 'addon')
+  const addonText = paidAddons.length
+    ? `收费附加项目：${paidAddons.map((item) => item.display_name).join('、')}。`
+    : ''
+  const weight = summary.pet_weight?.value
+    ? `本次计价体重${summary.pet_weight.value}${summary.pet_weight.unit}。`
+    : summary.pet_weight?.minimum
+      ? `本次计价体重${summary.pet_weight.minimum}到${summary.pet_weight.maximum}${summary.pet_weight.unit}。`
+      : ''
+  const price = quote?.total_min_cents !== null && quote?.total_min_cents !== undefined
+    ? quote.total_semantics === 'range' && quote.total_max_cents !== null
+      ? `服务报价${moneySpeech(quote.total_min_cents, quote.currency)}到${moneySpeech(quote.total_max_cents, quote.currency)}。`
+      : `服务报价${moneySpeech(quote.total_min_cents, quote.currency)}${quote.total_semantics === 'starting_at' ? '起' : ''}。`
+    : quote?.legacy_price_note ? `价格说明：${quote.legacy_price_note}。` : ''
+  const deposit = quote?.deposit_amount_cents
+    ? `本次应付预约金${moneySpeech(quote.deposit_amount_cents, quote.deposit_currency)}。${quote.deposit_note || '预约金后续如何抵扣待商家确认。'}`
+    : ''
   return [
     '请您确认预约摘要。',
     `${summary.customer_name}，为${summary.pet_species}${summary.pet_name}${age}预约${summary.service_name_zh}，`,
     `${date}${time}，由${summary.staff_display_name}服务。`,
     `联系电话是${summary.contact_phone}。`,
+    weight, addonText, price, deposit,
     notes ? `备注：${notes}。` : '',
     '如果以上信息正确，请在我说完后明确确认；现在还没有创建正式预约。',
   ].filter(Boolean).join('')
@@ -595,6 +721,9 @@ export function presentationTranscriptMatches(summary, transcript) {
     summary.service_name_zh, summary.staff_display_name,
     summary.pet_age_text,
     summary.pet_care_notes, summary.need_description,
+    ...(summary.service_quote?.line_items || [])
+      .filter((item) => item.kind === 'addon')
+      .map((item) => item.display_name),
   ].map(normalizedTranscript).filter(Boolean)
   if (!required.every((value) => normalized.includes(value))) return false
 
@@ -615,10 +744,20 @@ export function presentationTranscriptMatches(summary, transcript) {
     && mentionedStartTimes.has(expectedTime)
   const expectedPhone = digitsOnly(summary.contact_phone)
   const phoneMatches = expectedPhone.length >= 7 && mentionedPhones(transcript).has(expectedPhone)
+  const quote = summary.service_quote
+  const priceMatches = !quote || quote.total_min_cents === null
+    || normalized.includes(normalizedTranscript(`服务报价${moneySpeech(quote.total_min_cents, quote.currency)}`))
+  const maximumMatches = !quote || quote.total_semantics !== 'range' || quote.total_max_cents === null
+    || normalized.includes(normalizedTranscript(moneySpeech(quote.total_max_cents, quote.currency)))
+  const depositMatches = !quote?.deposit_amount_cents
+    || normalized.includes(normalizedTranscript(`应付预约金${moneySpeech(quote.deposit_amount_cents, quote.deposit_currency)}`))
 
   return dateMatches
     && timeMatches
     && phoneMatches
+    && priceMatches
+    && maximumMatches
+    && depositMatches
     && (normalized.includes('确认') || normalized.includes('预约'))
 }
 
@@ -633,6 +772,9 @@ export class MerchantCoordinator {
     this.operations = new Map()
     this.completedSessions = new Map()
     this.currentAvailability = new Map()
+    this.pendingSearchGoals = new Map()
+    this.activeAvailabilityIntents = new Map()
+    this.intentSequence = 0
   }
 
   async run(_input, options = {}) {
@@ -673,18 +815,21 @@ export class MerchantCoordinator {
     if (invocationKey && this.completedMutations.has(invocationKey)) {
       return this.completedMutations.get(invocationKey)
     }
+    const effectiveArgs = toolName === 'update_booking_draft'
+      ? this.captureAvailabilityIntent(sessionKey, args, context)
+      : args
     const inflightKey = invocationKey || [
       context.ownerId,
       context.sessionId,
       context.turnId,
       toolName,
-      stableJson(args),
+      stableJson(effectiveArgs),
     ].join('\u0000')
     if (this.inflightCalls.has(inflightKey)) return this.inflightCalls.get(inflightKey)
 
     const execute = () => {
       if (STATEFUL_TOOL_NAMES.has(toolName)) requireActiveTurn(context)
-      return this.executeBusinessTool(toolName, args, context)
+      return this.executeBusinessTool(toolName, effectiveArgs, context)
     }
     const pending = STATEFUL_TOOL_NAMES.has(toolName)
       ? this.enqueueSessionOperation(context, execute)
@@ -711,6 +856,39 @@ export class MerchantCoordinator {
     }
   }
 
+  captureAvailabilityIntent(sessionKey, args, context) {
+    const previous = this.activeAvailabilityIntents.get(sessionKey)
+    const rank = Number.isInteger(context.turnGeneration)
+      ? context.turnGeneration
+      : ++this.intentSequence
+    if (previous && rank < previous.rank) throw new StaleBusinessTurnError()
+
+    const clearFields = new Set(Array.isArray(args.clear_fields) ? args.clear_fields : [])
+    const touchesAvailability = AVAILABILITY_INTENT_FIELDS.some((field) => (
+      Object.hasOwn(args, field) || clearFields.has(field)
+    ))
+    const continuesSearch = args.search_availability_after_update === true
+      || this.pendingSearchGoals.has(sessionKey)
+    if (!touchesAvailability && !continuesSearch) return args
+
+    const fields = { ...(previous?.fields || {}) }
+    for (const field of AVAILABILITY_INTENT_FIELDS) {
+      if (clearFields.has(field)) delete fields[field]
+      if (Object.hasOwn(args, field)) fields[field] = args[field]
+    }
+    const effectiveArgs = { ...args }
+    for (const [field, value] of Object.entries(fields)) {
+      if (!Object.hasOwn(effectiveArgs, field) && !clearFields.has(field)) {
+        effectiveArgs[field] = value
+      }
+    }
+    boundedMapSet(this.activeAvailabilityIntents, sessionKey, { rank, fields })
+    if (args.search_availability_after_update === true) {
+      boundedMapSet(this.pendingSearchGoals, sessionKey, { goal: 'search_availability' })
+    }
+    return effectiveArgs
+  }
+
   enqueueSessionOperation(context, execute) {
     const key = `${context.ownerId}\u0000${context.sessionId}`
     const previous = this.sessionQueues.get(key) || Promise.resolve()
@@ -728,14 +906,78 @@ export class MerchantCoordinator {
     if (toolName === 'get_merchant_info') {
       return { output: merchantFacts(await this.toolClient.getMerchantInfo(context)) }
     }
+    if (toolName === 'quote_service') {
+      try {
+        const result = await this.toolClient.quoteService(context, {
+          service_id: args.service_id,
+          ...(Object.hasOwn(args, 'pet_species') ? { pet_species: args.pet_species } : {}),
+          ...(Object.hasOwn(args, 'weight') ? { weight: args.weight } : {}),
+          selected_addon_ids: Array.isArray(args.selected_addon_ids)
+            ? args.selected_addon_ids
+            : [],
+        })
+        return { output: quoteReceipt(result) }
+      } catch (error) {
+        if ([404, 422].includes(error?.status)) {
+          return {
+            output: {
+              status: 'quote_rejected',
+              current_goal: 'quote_service',
+              ready_for_current_goal: false,
+              missing_for_current_goal: [],
+              missing_for_booking_later: [],
+              current_state: {},
+              effect: {
+                type: 'service_quote_rejected', applied: false, draft_mutated: false,
+              },
+              reason: error?.code || 'quote_rejected',
+              next_step: { action: 'explain_rejection', type: 'explain_rejection' },
+            },
+          }
+        }
+        throw error
+      }
+    }
     if (toolName === 'update_booking_draft') {
       const current = await this.toolClient.getBookingDraft(context)
       requireActiveTurn(context)
+      let effectiveArgs = args
+      let staffResolution
+      if (
+        Object.hasOwn(args, 'staff_preference_text')
+        || Object.hasOwn(args, 'staff_id')
+      ) {
+        const merchant = await this.toolClient.getMerchantInfo(context)
+        requireActiveTurn(context)
+        const resolved = resolveStaffUpdate(args, current, merchant)
+        effectiveArgs = resolved.args
+        staffResolution = resolved.resolution
+        if (!effectiveArgs) {
+          return {
+            output: {
+              status: 'update_rejected',
+              current_goal: 'update_booking_details',
+              ready_for_current_goal: false,
+              missing_for_current_goal: ['staff_preference_text'],
+              missing_for_booking_later: current.missing_for_booking || [],
+              current_state: {},
+              effect: { type: 'draft_update_rejected', applied: false },
+              reason: 'untrusted_staff_reference',
+              next_step: {
+                action: 'ask_one_field',
+                type: 'ask_one_field',
+                field: 'staff_preference_text',
+                for_goal: 'resolve_staff_preference',
+              },
+            },
+          }
+        }
+      }
       let updated
       try {
         updated = await this.toolClient.updateBookingDraft(
           context,
-          draftPatch(args, current.draft.version),
+          draftPatch(effectiveArgs, current.draft.version),
         )
       } catch (error) {
         if (error?.code === 'booking_already_submitted') throw error
@@ -753,6 +995,9 @@ export class MerchantCoordinator {
           'preferred_time_of_day',
           'staff_preference_text',
           'staff_id',
+          'pet_species',
+          'pet_weight',
+          'selected_addon_ids',
         ].includes(field)
       ))) {
         boundedMapSet(this.currentAvailability, sessionKey, {
@@ -763,7 +1008,9 @@ export class MerchantCoordinator {
       }
       let availabilityResult
       let availabilityError
-      if (args.search_availability_after_update === true) {
+      const searchRequested = effectiveArgs.search_availability_after_update === true
+        || this.pendingSearchGoals.has(sessionKey)
+      if (searchRequested) {
         if (!updated.missing_for_availability?.length) {
           requireActiveTurn(context)
           try {
@@ -777,13 +1024,15 @@ export class MerchantCoordinator {
         }
       }
       const output = projectDraftReceipt(updated, {
-          searchRequested: args.search_availability_after_update === true,
+          searchRequested,
           availabilityResult,
           availabilityError,
+          staffResolution,
         })
       if (availabilityResult) {
         if (output.current_state.availability?.belongs_to_current_draft) {
           boundedMapSet(this.currentAvailability, sessionKey, availabilityResult.search)
+          this.pendingSearchGoals.delete(sessionKey)
         } else {
           boundedMapSet(this.currentAvailability, sessionKey, {
             status: 'needs_search', candidates: [],
@@ -811,6 +1060,9 @@ export class MerchantCoordinator {
                 preferred_date: current.draft.preferred_date,
               },
         )
+        if (output.current_state.availability.belongs_to_current_draft) {
+          this.pendingSearchGoals.delete(sessionKey)
+        }
         return { output }
       } catch (error) {
         if (error?.code === 'booking_already_submitted') throw error

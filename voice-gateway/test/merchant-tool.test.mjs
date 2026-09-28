@@ -13,6 +13,28 @@ async function listen(handler) {
   }
 }
 
+test('read-only quote transport failure is never classified as an unknown write result', async () => {
+  const backend = await listen((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end('{')
+  })
+  try {
+    const client = new MerchantToolClient({
+      backendBaseUrl: backend.origin,
+      merchantId: 'demo-grooming-001',
+      serviceToken: 'test-token',
+    })
+    await assert.rejects(
+      client.quoteService({ ownerId: 'owner-a', sessionId: 'session-a', turnId: 'turn-a' }, {
+        service_id: 'demo-bath', selected_addon_ids: [],
+      }),
+      (error) => error?.code !== 'result_unknown',
+    )
+  } finally {
+    await backend.close()
+  }
+})
+
 test('merchant tool sends server-bound merchant and gateway session context', async () => {
   let receivedHeaders
   const backend = await listen((request, response) => {
@@ -92,13 +114,20 @@ test('merchant tool sends server-bound merchant and gateway session context', as
     assert.deepEqual(facts.merchant.services[0].supported_species, ['犬'])
     assert.equal(facts.merchant.local_date, '2026-09-19')
     assert.match(facts.merchant.business_hours.note, /下午 5 点/)
-    assert.deepEqual(facts.merchant.staff[0].specialties, ['犬类基础洗护'])
+    assert.deepEqual(
+      facts.merchant.staff[0].qualification_facts.specialties,
+      ['犬类基础洗护'],
+    )
+    assert.equal(facts.merchant.staff[0].display_name, 'Lisa')
+    assert.equal(facts.merchant.staff[0].public_description, '犬类洗护人员')
+    assert.equal(facts.merchant.staff[0].resolution_status, 'catalog_entry')
+    assert.equal(JSON.stringify(facts).includes('demo-staff-lisa'), false)
     assert.match(facts.relative_date_rule, /merchant\.local_date/)
     assert.equal(Object.hasOwn(facts, 'availability_checked'), false)
     assert.equal(Object.hasOwn(facts, 'booking_created'), false)
     assert.equal(facts.current_state.merchant.local_date, '2026-09-19')
     assert.equal(facts.effect.type, 'merchant_information_read')
-    assert.equal(facts.next_step.type, 'answer_customer_question')
+    assert.equal(facts.next_step.action, 'answer_customer_question')
     assert.match(result.metadata.presentation.inline.content, /资料边界/)
     assert.match(result.metadata.presentation.inline.content, /约 60 分钟/)
     assert.match(result.metadata.presentation.inline.content, /营业时间/)

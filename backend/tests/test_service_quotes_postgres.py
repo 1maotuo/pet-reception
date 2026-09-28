@@ -180,6 +180,17 @@ def test_configuration_round_trips_and_repeated_seed_is_idempotent(environment) 
         "service_configuration" not in service
         for service in public_merchant["services"]
     )
+    public_bath = next(
+        service for service in public_merchant["services"]
+        if service["id"] == "synthetic-dog-bath"
+    )
+    assert public_bath["combination_options"]["addons"][0] == {
+        "id": "teeth-brushing",
+        "display_name": "刷牙",
+        "enabled": True,
+        "supported_species": ["犬"],
+    }
+    assert "price" not in public_bath["combination_options"]["addons"][0]
 
 
 def test_quote_without_draft_has_no_booking_side_effects(environment) -> None:
@@ -202,6 +213,8 @@ def test_quote_without_draft_has_no_booking_side_effects(environment) -> None:
     quote = response.json()["quote"]
     assert quote["total_min_cents"] == quote["total_max_cents"] == 7200
     assert quote["scheduling_duration_minutes"] == 70
+    assert quote["deposit_amount_cents"] == 2000
+    assert quote["deposit_currency"] == "USD"
     assert business_counts(store) == before
 
 

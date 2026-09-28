@@ -74,6 +74,7 @@ export function configureEnvironment() {
   process.env.PET_RECEPTION_VAD_THRESHOLD = String(vadThreshold)
   process.env.PET_RECEPTION_FRONTEND_TOOL_ALLOWLIST = [
     'get_merchant_info',
+    'quote_service',
     'update_booking_draft',
     'search_availability',
     'prepare_booking',

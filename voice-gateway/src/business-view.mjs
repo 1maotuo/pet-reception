@@ -3,10 +3,11 @@ const SAVED_DRAFT_FIELDS = Object.freeze([
   'pet_age_years', 'pet_age_months', 'pet_age_text', 'pet_care_notes',
   'need_description', 'preferred_date', 'preferred_time_of_day',
   'staff_preference_text',
+  'pet_weight', 'selected_addon_ids',
 ])
 
 const INTERNAL_DRAFT_FIELDS = Object.freeze([
-  'id', 'service_id', 'staff_id', 'selected_candidate_id',
+  'id', 'service_id', 'selected_candidate_id',
   'pending_preparation_id', 'booking_id',
 ])
 
@@ -27,6 +28,8 @@ const FIELD_LABELS = Object.freeze({
   staff_preference_text: '服务人员偏好',
   staff_id: '服务人员',
   selected_candidate_id: '预约时段',
+  pet_weight: '宠物体重',
+  selected_addon_ids: '附加项目',
 })
 
 function hasValue(value) {
@@ -39,40 +42,84 @@ function copyPresent(source, fields) {
     .map((field) => [field, source[field]]))
 }
 
+function publicMissing(fields = []) {
+  return [...new Set(fields.map((field) => (
+    field === 'staff_id' ? 'staff_preference_text' : field
+  )))]
+}
+
+function nextStep(action, details = {}) {
+  return { action, type: action, ...details }
+}
+
 function publicDraft(draft = {}) {
-  const { merchant_id, owner_id, voice_session_id, ...safe } = draft
+  const { merchant_id, owner_id, voice_session_id, staff_id, ...safe } = draft
   return safe
 }
 
-function currentDraft(result) {
+function currentDraft(result, staffResolution) {
   const draft = result?.draft || {}
   const internalReferences = copyPresent(draft, INTERNAL_DRAFT_FIELDS)
   if (hasValue(internalReferences.id)) {
     internalReferences.draft_id = internalReferences.id
     delete internalReferences.id
   }
-  return {
+  const projected = {
     version: draft.version,
     availability_revision: draft.availability_revision,
     saved_fields: copyPresent(draft, SAVED_DRAFT_FIELDS),
     internal_references: internalReferences,
-    missing_for_availability: [...(result?.missing_for_availability || [])],
-    missing_for_booking: [...(result?.missing_for_booking || [])],
+    missing_for_availability: publicMissing(result?.missing_for_availability),
+    missing_for_booking: publicMissing(result?.missing_for_booking),
+    ...(result?.service_quote ? { service_quote: result.service_quote } : {}),
   }
+  if (hasValue(draft.staff_preference_text)) {
+    projected.staff_preference = {
+      text: draft.staff_preference_text,
+      resolution: staffResolution?.resolution || (draft.staff_id ? 'resolved' : 'unresolved'),
+      ...(staffResolution?.display_name
+        ? { display_name: staffResolution.display_name }
+        : {}),
+    }
+  }
+  return projected
 }
 
 function searchMatchesDraft(draftResult, availabilityResult) {
   const draft = draftResult?.draft
   const search = availabilityResult?.search
-  if (!draft || !search || search.is_current === false) return false
-  return String(search.draft_id) === String(draft.id)
+  const context = availabilityResult?.context
+  if (!draft || !search || search.is_current !== true || !context) return false
+  const createdAt = Date.parse(search.created_at)
+  return String(context.merchant_id) === String(draft.merchant_id)
+    && String(context.owner_id) === String(draft.owner_id)
+    && String(context.voice_session_id) === String(draft.voice_session_id)
+    && String(search.draft_id) === String(draft.id)
     && Number(search.draft_version) === Number(draft.version)
     && Number(search.availability_revision) === Number(draft.availability_revision)
+    && Number.isInteger(Number(search.schedule_revision))
+    && String(search.service_id) === String(draft.service_id)
+    && String(search.preferred_date) === String(draft.preferred_date)
+    && String(search.preferred_time_of_day || '') === String(draft.preferred_time_of_day || '')
+    && String(search.staff_id || '') === String(draft.staff_id || '')
+    && Number.isFinite(createdAt)
 }
 
 function availabilityBody(availabilityResult, belongsToCurrentDraft) {
-  const { draft_id, ...search } = availabilityResult?.search || {}
-  if (belongsToCurrentDraft) return search
+  const {
+    draft_id, staff_id, service_id, candidates = [], alternative_dates = [], ...search
+  } = availabilityResult?.search || {}
+  const publicCandidates = candidates.map((candidate) => {
+    const { staff_id: _staffId, service_id: _serviceId, ...safe } = candidate
+    return safe
+  })
+  const publicAlternatives = alternative_dates.map((alternative) => {
+    const { available_staff_ids: _staffIds, ...safe } = alternative
+    return safe
+  })
+  if (belongsToCurrentDraft) {
+    return { ...search, candidates: publicCandidates, alternative_dates: publicAlternatives }
+  }
   return { ...search, candidates: [], alternative_dates: [] }
 }
 
@@ -88,8 +135,13 @@ function availabilityState(availabilityResult, belongsToCurrentDraft) {
       preferred_date: search.preferred_date,
       preferred_time_of_day: search.preferred_time_of_day,
     }
+    state.revisions = {
+      draft_version: search.draft_version,
+      availability_revision: search.availability_revision,
+      schedule_revision: search.schedule_revision,
+    }
+    state.checked_at = search.created_at
     state.internal_references = {
-      ...(hasValue(search.staff_id) ? { staff_id: search.staff_id } : {}),
       ...(hasValue(search.service_id) ? { service_id: search.service_id } : {}),
     }
   }
@@ -98,47 +150,66 @@ function availabilityState(availabilityResult, belongsToCurrentDraft) {
 
 function availabilityNextStep(search, belongsToCurrentDraft) {
   if (!belongsToCurrentDraft) {
-    return { type: 'refresh_availability', for_goal: 'search_availability' }
+    return nextStep('search_availability', { for_goal: 'search_availability' })
   }
   if (search.status === 'no_availability' && search.alternative_dates?.length) {
-    return {
-      type: 'present_alternative_dates',
+    return nextStep('present_alternative_dates', {
       for_goal: 'search_availability',
       instruction: '只能说明返回的替代日期；客户选定后先更新日期并重新查询。',
-    }
+    })
   }
   if (search.candidates?.length) {
-    return {
-      type: 'present_availability',
+    return nextStep('present_availability', {
       for_goal: 'search_availability',
       instruction: '用客户听得懂的当地时间回答，不朗读任何内部引用。',
-    }
+    })
   }
-  return {
-    type: 'explain_no_availability',
+  return nextStep('explain_no_availability', {
     for_goal: 'search_availability',
     instruction: '只说本次真实查询没有可选时段，不猜测原因。',
-  }
+  })
 }
 
-function availabilityView(draftResult, availabilityResult) {
+function availabilityView(draftResult, availabilityResult, staffResolution) {
   const belongsToCurrentDraft = searchMatchesDraft(draftResult, availabilityResult)
   const availability = availabilityBody(availabilityResult, belongsToCurrentDraft)
   return {
     belongsToCurrentDraft,
     availability,
     current_state: {
-      draft: currentDraft(draftResult),
+      draft: currentDraft(draftResult, staffResolution),
       availability: availabilityState(availabilityResult, belongsToCurrentDraft),
     },
     next_step: availabilityNextStep(availability, belongsToCurrentDraft),
   }
 }
 
-export function projectAvailabilityReceipt(draftResult, availabilityResult) {
-  const view = availabilityView(draftResult, availabilityResult)
+function goalFields(result, currentGoal) {
+  const missingForCurrentGoal = currentGoal === 'search_availability'
+    ? publicMissing(result?.missing_for_availability)
+    : []
+  return {
+    current_goal: currentGoal,
+    ready_for_current_goal: missingForCurrentGoal.length === 0,
+    missing_for_current_goal: missingForCurrentGoal,
+    missing_for_booking_later: publicMissing(result?.missing_for_booking),
+  }
+}
+
+function askForCurrentGoal(missing, currentGoal) {
+  return nextStep('ask_one_field', {
+    field: missing[0],
+    for_goal: currentGoal,
+  })
+}
+
+export function projectAvailabilityReceipt(draftResult, availabilityResult, {
+  staffResolution,
+} = {}) {
+  const view = availabilityView(draftResult, availabilityResult, staffResolution)
   return {
     status: view.belongsToCurrentDraft ? 'ok' : 'stale',
+    ...goalFields(draftResult, 'search_availability'),
     current_state: view.current_state,
     effect: {
       type: view.belongsToCurrentDraft ? 'availability_checked' : 'stale_availability_ignored',
@@ -153,31 +224,50 @@ export function projectDraftReceipt(result, {
   searchRequested = false,
   availabilityResult,
   availabilityError,
+  staffResolution,
 } = {}) {
   const changedFields = [...(result?.changed_fields || [])]
   const draft = publicDraft(result?.draft)
+  const unresolvedStaff = staffResolution?.resolution === 'unresolved'
+  const currentGoal = searchRequested
+    ? 'search_availability'
+    : unresolvedStaff
+      ? 'resolve_staff_preference'
+      : 'update_booking_details'
+  const goals = unresolvedStaff && !searchRequested
+    ? {
+        current_goal: currentGoal,
+        ready_for_current_goal: false,
+        missing_for_current_goal: ['staff_preference_text'],
+        missing_for_booking_later: publicMissing(result?.missing_for_booking),
+      }
+    : goalFields(result, currentGoal)
   const base = {
     status: 'ok',
-    current_state: { draft: currentDraft(result) },
+    ...goals,
+    current_state: { draft: currentDraft(result, staffResolution) },
     effect: {
       type: changedFields.length ? 'draft_updated' : 'draft_already_current',
       applied: true,
       changed_fields: changedFields,
     },
-    next_step: { type: 'continue_customer_goal' },
+    next_step: unresolvedStaff && !searchRequested
+      ? askForCurrentGoal(['staff_preference_text'], 'resolve_staff_preference')
+      : searchRequested
+      ? nextStep('search_availability', { for_goal: 'search_availability' })
+      : nextStep('answer_or_ask_for_customer_goal'),
     draft,
     changed_fields: changedFields,
-    missing_for_availability: [...(result?.missing_for_availability || [])],
-    missing_for_booking: [...(result?.missing_for_booking || [])],
+    missing_for_availability: publicMissing(result?.missing_for_availability),
+    missing_for_booking: publicMissing(result?.missing_for_booking),
   }
 
   if (!searchRequested) return base
   if (result?.missing_for_availability?.length) {
-    base.next_step = {
-      type: 'need_input',
-      missing: [...result.missing_for_availability],
-      for_goal: 'search_availability',
-    }
+    base.next_step = askForCurrentGoal(
+      publicMissing(result.missing_for_availability),
+      'search_availability',
+    )
     return base
   }
   if (availabilityError) {
@@ -189,15 +279,14 @@ export function projectDraftReceipt(result, {
         type: 'draft_saved_availability_failed',
         availability_checked: false,
       },
-      next_step: {
-        type: 'retry_availability',
+      next_step: nextStep('retry_availability', {
         for_goal: 'search_availability',
         reason: 'temporarily_unavailable',
-      },
+      }),
     }
   }
   if (availabilityResult) {
-    const view = availabilityView(result, availabilityResult)
+    const view = availabilityView(result, availabilityResult, staffResolution)
     return {
       ...base,
       status: view.belongsToCurrentDraft ? 'ok' : 'stale',
@@ -248,18 +337,21 @@ export function projectRejectedReceipt(toolName, error, draftResult) {
     ? { draft: currentDraft(draftResult) }
     : {}
   const reason = rejectionReason(error)
-  const nextStep = reason === 'current_state_changed'
-    ? {
-        type: isUpdate ? 'retry_update_once' : 'refresh_availability',
+  const nextStepValue = reason === 'current_state_changed'
+    ? nextStep(isUpdate ? 'retry_update_once' : 'search_availability', {
         instruction: '下一次调用会先读取最新草稿；同一状态不得循环重试。',
-      }
+      })
     : missing.length
-    ? { type: 'need_input', missing, for_goal: 'search_availability' }
+    ? askForCurrentGoal(publicMissing(missing), 'search_availability')
     : invalidFields.length
-      ? { type: 'clarify_field', fields: invalidFields }
-      : { type: 'explain_rejection' }
+      ? nextStep('clarify_field', { fields: invalidFields })
+      : nextStep('explain_rejection')
   return {
     status: isUpdate ? 'update_rejected' : 'business_rule_rejected',
+    current_goal: missing.length ? 'search_availability' : 'update_booking_details',
+    ready_for_current_goal: false,
+    missing_for_current_goal: publicMissing(missing),
+    missing_for_booking_later: publicMissing(draftResult?.missing_for_booking),
     current_state,
     effect: {
       type: isUpdate ? 'draft_update_rejected' : 'operation_rejected',
@@ -267,7 +359,7 @@ export function projectRejectedReceipt(toolName, error, draftResult) {
     },
     invalid_fields: invalidFields,
     reason,
-    next_step: nextStep,
+    next_step: nextStepValue,
   }
 }
 
@@ -304,12 +396,12 @@ export function projectOperationReceipt(result) {
       applied: true,
     },
     next_step: result.status === 'prepared'
-      ? { type: 'present_controlled_summary' }
+      ? nextStep('present_controlled_summary')
       : result.status === 'awaiting_payment'
-        ? { type: 'complete_payment' }
+        ? nextStep('complete_payment')
         : result.status === 'confirmed'
-          ? { type: 'inform_confirmed' }
-          : { type: 'follow_backend_status' },
+          ? nextStep('inform_confirmed')
+          : nextStep('follow_backend_status'),
     preparation: result.preparation,
     booking: result.booking,
   }

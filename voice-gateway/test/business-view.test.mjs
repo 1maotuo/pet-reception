@@ -45,11 +45,18 @@ function draftResult(overrides = {}) {
 
 function availabilityResult(overrides = {}) {
   return {
+    context: {
+      merchant_id: 'merchant-1',
+      owner_id: 'owner-1',
+      voice_session_id: 'session-1',
+      turn_id: 'turn-1',
+    },
     search: {
       id: 'search-1',
       draft_id: 'draft-1',
       draft_version: 4,
       availability_revision: 3,
+      schedule_revision: 8,
       service_id: 'service-full-grooming',
       staff_id: 'staff-lisa',
       preferred_date: '2026-09-21',
@@ -65,6 +72,7 @@ function availabilityResult(overrides = {}) {
         ends_at: '2026-09-21T15:00:00-07:00',
       }],
       alternative_dates: [],
+      created_at: '2026-09-19T18:00:00Z',
       ...overrides,
     },
   }
@@ -96,9 +104,13 @@ test('missing date receipt keeps the unfinished availability goal', () => {
   const receipt = projectDraftReceipt(input, { searchRequested: true })
 
   assert.equal(receipt.status, 'ok')
-  assert.equal(receipt.next_step.type, 'need_input')
+  assert.equal(receipt.current_goal, 'search_availability')
+  assert.equal(receipt.ready_for_current_goal, false)
+  assert.deepEqual(receipt.missing_for_current_goal, ['preferred_date'])
+  assert.deepEqual(receipt.missing_for_booking_later, ['selected_availability'])
+  assert.equal(receipt.next_step.action, 'ask_one_field')
+  assert.equal(receipt.next_step.field, 'preferred_date')
   assert.equal(receipt.next_step.for_goal, 'search_availability')
-  assert.deepEqual(receipt.next_step.missing, ['preferred_date'])
 })
 
 test('standalone and chained availability use the same authoritative current state', () => {
@@ -113,7 +125,7 @@ test('standalone and chained availability use the same authoritative current sta
   assert.deepEqual(chained.current_state, standalone.current_state)
   assert.deepEqual(chained.availability, standalone.availability)
   assert.equal(standalone.current_state.availability.belongs_to_current_draft, true)
-  assert.equal(standalone.next_step.type, 'present_availability')
+  assert.equal(standalone.next_step.action, 'present_availability')
   assert.equal(standalone.current_state.draft.missing_for_booking.includes('customer_name'), false)
 })
 
@@ -126,7 +138,7 @@ test('a saved update followed by a failed search remains an applied partial succ
   assert.equal(receipt.status, 'partial_success')
   assert.equal(receipt.effect.applied, true)
   assert.equal(receipt.effect.availability_checked, false)
-  assert.equal(receipt.next_step.type, 'retry_availability')
+  assert.equal(receipt.next_step.action, 'retry_availability')
   assert.equal(receipt.next_step.for_goal, 'search_availability')
   assert.equal(JSON.stringify(receipt).includes('socket exploded'), false)
 })
@@ -140,7 +152,7 @@ test('a stale availability result is not exposed as current candidates', () => {
   assert.equal(receipt.status, 'stale')
   assert.equal(receipt.current_state.availability.belongs_to_current_draft, false)
   assert.deepEqual(receipt.availability.candidates, [])
-  assert.equal(receipt.next_step.type, 'refresh_availability')
+  assert.equal(receipt.next_step.action, 'search_availability')
 })
 
 test('validation rejection is business-safe and proves no fields were applied', () => {
@@ -154,7 +166,7 @@ test('validation rejection is business-safe and proves no fields were applied', 
   assert.equal(receipt.status, 'update_rejected')
   assert.equal(receipt.effect.applied, false)
   assert.deepEqual(receipt.invalid_fields, ['联系电话'])
-  assert.equal(receipt.next_step.type, 'clarify_field')
+  assert.equal(receipt.next_step.action, 'clarify_field')
   const serialized = JSON.stringify({
     invalid_fields: receipt.invalid_fields,
     reason: receipt.reason,
@@ -192,13 +204,22 @@ test('operation receipt only states preparation or booking state actually read',
 })
 
 test('a supplied date completes the retained availability goal in the same tool receipt', async () => {
-  let state = draftResult({ preferred_date: null }).draft
+  let state = draftResult({
+    preferred_date: null,
+    customer_name: null,
+    contact_phone: null,
+    pet_name: null,
+    pet_age_text: null,
+    pet_age_months: null,
+  }).draft
   let searchCalls = 0
   const resultFor = (changed_fields = []) => ({
     draft: { ...state },
     changed_fields,
     missing_for_availability: state.preferred_date ? [] : ['preferred_date'],
-    missing_for_booking: ['selected_availability'],
+    missing_for_booking: [
+      'customer_name', 'contact_phone', 'pet_name', 'pet_age', 'selected_availability',
+    ],
   })
   const coordinator = new MerchantCoordinator({
     toolClient: {
@@ -235,7 +256,7 @@ test('a supplied date completes the retained availability goal in the same tool 
     { service_id: 'service-full-grooming', search_availability_after_update: true },
     context,
   )
-  assert.equal(waiting.output.next_step.type, 'need_input')
+  assert.equal(waiting.output.next_step.action, 'ask_one_field')
   assert.equal(waiting.output.next_step.for_goal, 'search_availability')
   assert.equal(searchCalls, 0)
 
@@ -244,14 +265,18 @@ test('a supplied date completes the retained availability goal in the same tool 
     {
       preferred_date: '2026-09-21',
       preferred_time_of_day: 'afternoon',
-      search_availability_after_update: true,
     },
     { ...context, turnId: 'turn-2' },
   )
   assert.equal(searchCalls, 1)
-  assert.equal(completed.output.next_step.type, 'present_availability')
-  assert.equal(completed.output.current_state.draft.saved_fields.customer_name, '王')
-  assert.equal(completed.output.current_state.draft.saved_fields.pet_name, '元宝')
+  assert.equal(completed.output.next_step.action, 'present_availability')
+  assert.equal(completed.output.ready_for_current_goal, true)
+  assert.deepEqual(completed.output.missing_for_current_goal, [])
+  assert.deepEqual(completed.output.missing_for_booking_later, [
+    'customer_name', 'contact_phone', 'pet_name', 'pet_age', 'selected_availability',
+  ])
+  assert.equal(Object.hasOwn(completed.output.current_state.draft.saved_fields, 'customer_name'), false)
+  assert.equal(Object.hasOwn(completed.output.current_state.draft.saved_fields, 'pet_name'), false)
   assert.equal(completed.output.current_state.availability.belongs_to_current_draft, true)
 })
 
@@ -298,6 +323,68 @@ test('coordinator reports a successful same-value update without claiming failur
   assert.equal(response.output.effect.type, 'draft_already_current')
   assert.equal(response.output.effect.applied, true)
   assert.equal(response.output.current_state.draft.saved_fields.customer_name, '王')
+})
+
+test('staff preference is resolved only by an exact unique public name', async () => {
+  let state = draftResult({
+    staff_preference_text: null,
+    staff_id: null,
+  }).draft
+  const patches = []
+  const resultFor = (changed_fields = []) => ({
+    draft: { ...state },
+    changed_fields,
+    missing_for_availability: state.staff_preference_text && !state.staff_id ? ['staff_id'] : [],
+    missing_for_booking: ['selected_availability'],
+  })
+  const coordinator = new MerchantCoordinator({
+    toolClient: {
+      getBookingDraft: async () => resultFor(),
+      getMerchantInfo: async () => ({
+        merchant: {
+          staff: [
+            { id: 'demo-staff-lisa', display_name: 'Lisa' },
+            { id: 'demo-staff-marco', display_name: 'Marco' },
+          ],
+        },
+      }),
+      updateBookingDraft: async (_context, patch) => {
+        patches.push(patch)
+        state = {
+          ...state,
+          staff_preference_text: patch.staff_preference_text,
+          staff_id: patch.staff_id || null,
+          version: state.version + 1,
+          availability_revision: state.availability_revision + 1,
+        }
+        return resultFor(['staff_preference_text', 'staff_id'])
+      },
+    },
+  })
+  const context = { ownerId: 'owner-1', sessionId: 'session-1', turnId: 'turn-staff-1' }
+
+  const unknown = await coordinator.runBusinessTool(
+    'update_booking_draft',
+    { staff_preference_text: 'LELECHA', staff_id: 'demo-staff-lisa' },
+    context,
+  )
+  assert.equal(patches[0].staff_preference_text, 'LELECHA')
+  assert.equal(Object.hasOwn(patches[0], 'staff_id'), false)
+  assert.equal(unknown.output.current_state.draft.staff_preference.resolution, 'unresolved')
+  assert.equal(unknown.output.next_step.action, 'ask_one_field')
+  assert.equal(unknown.output.next_step.field, 'staff_preference_text')
+  assert.equal(JSON.stringify(unknown.output).includes('demo-staff-lisa'), false)
+
+  const lisa = await coordinator.runBusinessTool(
+    'update_booking_draft',
+    { staff_preference_text: '最好是 Lisa' },
+    { ...context, turnId: 'turn-staff-2' },
+  )
+  assert.equal(patches[1].staff_preference_text, '最好是 Lisa')
+  assert.equal(patches[1].staff_id, 'demo-staff-lisa')
+  assert.equal(lisa.output.current_state.draft.staff_preference.resolution, 'resolved')
+  assert.equal(lisa.output.current_state.draft.staff_preference.display_name, 'Lisa')
+  assert.equal(JSON.stringify(lisa.output).includes('demo-staff-lisa'), false)
 })
 
 test('a 1 PM Lisa candidate remains usable after collecting unrelated identity fields', async () => {

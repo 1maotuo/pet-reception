@@ -57,6 +57,8 @@ from .schemas import (
     DraftFieldName,
     MerchantStaff,
     MerchantService,
+    PublicServiceCombinationOptions,
+    PublicServiceAddonOption,
     MerchantBookingList,
     ServiceConfiguration,
     ServiceQuoteRequest,
@@ -326,6 +328,31 @@ class PostgresStore:
                     assessment_required_for=row["assessment_required_for"] or [],
                     not_included=row["not_included"] or [],
                     service_configuration=row["service_configuration"],
+                    combination_options=(
+                        PublicServiceCombinationOptions(
+                            service_kind=configuration.service_kind,
+                            included_items=configuration.included_items,
+                            addons=[
+                                PublicServiceAddonOption(
+                                    id=addon.id,
+                                    display_name=addon.display_name,
+                                    enabled=addon.enabled,
+                                    supported_species=addon.supported_species,
+                                )
+                                for addon in configuration.addons
+                            ],
+                        )
+                        if (
+                            configuration := (
+                                ServiceConfiguration.model_validate(
+                                    row["service_configuration"]
+                                )
+                                if row["service_configuration"] is not None
+                                else None
+                            )
+                        )
+                        else None
+                    ),
                     source=row["source"],
                 )
                 for row in service_rows

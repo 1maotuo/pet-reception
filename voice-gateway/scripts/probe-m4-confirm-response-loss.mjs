@@ -119,10 +119,10 @@ try {
       {},
       context(`search_${selectedWeek}`),
     )
-    if (searched.output.search.status === 'available') break
+    if (searched.output.availability.status === 'available') break
   }
-  assert.equal(searched.output.search.status, 'available')
-  const candidate = searched.output.search.candidates[0]
+  assert.equal(searched.output.availability.status, 'available')
+  const candidate = searched.output.availability.candidates[0]
   const prepared = await coordinator.runBusinessTool(
     'prepare_booking',
     { candidate_id: candidate.id },

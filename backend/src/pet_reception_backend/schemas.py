@@ -211,6 +211,21 @@ class ServiceConfiguration(BaseModel):
             raise ValueError("weight tiers must include one unbounded final tier")
 
 
+class PublicServiceAddonOption(BaseModel):
+    id: str
+    display_name: str
+    enabled: bool
+    supported_species: list[str] = Field(default_factory=list)
+
+
+class PublicServiceCombinationOptions(BaseModel):
+    """Safe catalog projection for the realtime model; no pricing rules."""
+
+    service_kind: Literal["package", "standalone"]
+    included_items: list[ServiceItemConfiguration] = Field(default_factory=list)
+    addons: list[PublicServiceAddonOption] = Field(default_factory=list)
+
+
 class MerchantService(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -227,6 +242,7 @@ class MerchantService(BaseModel):
     # Internal catalog fact. Callers receive only the calculated quote, never
     # the raw rule set through the existing merchant-info/model tool.
     service_configuration: ServiceConfiguration | None = Field(default=None, exclude=True)
+    combination_options: PublicServiceCombinationOptions | None = None
 
 
 class QuoteWeightInput(BaseModel):
