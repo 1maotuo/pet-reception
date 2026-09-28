@@ -611,6 +611,22 @@ def add_m4_public_merchant_profile(connection: Connection) -> None:
     )
 
 
+def add_grooming_service_configuration(connection: Connection) -> None:
+    """Store optional, strongly validated Stage A pricing/service rules."""
+    connection.execute(
+        text(
+            "ALTER TABLE merchant_services "
+            "ADD COLUMN IF NOT EXISTS service_configuration JSONB"
+        )
+    )
+    connection.execute(
+        text(
+            "UPDATE merchant_services SET service_configuration = NULL "
+            "WHERE service_configuration = 'null'::jsonb"
+        )
+    )
+
+
 MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0001_m2_merchant_and_booking_drafts", create_m2_schema),
     ("0002_m2_staff_and_availability", add_m2_availability_schema),
@@ -621,6 +637,7 @@ MIGRATIONS: tuple[tuple[str, Callable[[Connection], None]], ...] = (
     ("0007_m4_grooming_catalog", add_m4_grooming_catalog),
     ("0008_m4_session_and_age_contract", add_m4_session_and_age_contract),
     ("0009_m4_public_merchant_profile", add_m4_public_merchant_profile),
+    ("0010_grooming_service_configuration", add_grooming_service_configuration),
 )
 
 

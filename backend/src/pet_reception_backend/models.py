@@ -63,6 +63,7 @@ merchant_services = Table(
     Column("recommended_for", JSONB, nullable=False, server_default="[]"),
     Column("assessment_required_for", JSONB, nullable=False, server_default="[]"),
     Column("not_included", JSONB, nullable=False, server_default="[]"),
+    Column("service_configuration", JSONB(none_as_null=True)),
     Column("source", String(200)),
     Column("active", Boolean, nullable=False, server_default="true"),
     Column("display_order", Integer, nullable=False, server_default="0"),

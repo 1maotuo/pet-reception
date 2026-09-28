@@ -58,8 +58,12 @@ from .schemas import (
     MerchantStaff,
     MerchantService,
     MerchantBookingList,
+    ServiceConfiguration,
+    ServiceQuoteRequest,
+    ServiceQuoteResult,
     VoiceRequestContext,
 )
+from .service_configuration import calculate_service_quote
 
 
 class MerchantNotFoundError(LookupError):
@@ -124,6 +128,12 @@ AVAILABILITY_FIELDS = frozenset(
 
 class DataStore(Protocol):
     def get_merchant(self, merchant_id: str) -> DemoMerchant | None: ...
+
+    def quote_service(
+        self,
+        context: VoiceRequestContext,
+        request: ServiceQuoteRequest,
+    ) -> ServiceQuoteResult: ...
 
     def get_or_create_draft(self, context: VoiceRequestContext) -> BookingDraft: ...
 
@@ -297,6 +307,7 @@ class PostgresStore:
                     recommended_for=row["recommended_for"] or [],
                     assessment_required_for=row["assessment_required_for"] or [],
                     not_included=row["not_included"] or [],
+                    service_configuration=row["service_configuration"],
                     source=row["source"],
                 )
                 for row in service_rows
@@ -349,6 +360,44 @@ class PostgresStore:
             business_hours=merchant_row["business_hours"],
         )
 
+    def quote_service(
+        self,
+        context: VoiceRequestContext,
+        request: ServiceQuoteRequest,
+    ) -> ServiceQuoteResult:
+        merchant = self.get_merchant(context.merchant_id)
+        if merchant is None:
+            raise MerchantNotFoundError(context.merchant_id)
+
+        requested_ids = {
+            addon_id.strip() for addon_id in request.selected_addon_ids if addon_id.strip()
+        }
+        foreign_addon_ids: set[str] = set()
+        if requested_ids:
+            with self.engine.connect() as connection:
+                foreign_configurations = connection.execute(
+                    select(merchant_services.c.service_configuration).where(
+                        merchant_services.c.merchant_id != context.merchant_id,
+                        merchant_services.c.service_configuration.is_not(None),
+                    )
+                ).scalars()
+                for raw_configuration in foreign_configurations:
+                    if raw_configuration is None:
+                        continue
+                    configuration = ServiceConfiguration.model_validate(
+                        raw_configuration
+                    )
+                    configured_ids = {
+                        item.id for item in configuration.included_items
+                    }.union(item.id for item in configuration.addons)
+                    foreign_addon_ids.update(requested_ids.intersection(configured_ids))
+
+        return calculate_service_quote(
+            merchant,
+            request,
+            foreign_addon_ids=foreign_addon_ids,
+        )
+
     def upsert_merchant(self, merchant: DemoMerchant) -> None:
         scheduling = getattr(merchant, "scheduling", None)
         schedule_fingerprint = self._schedule_fingerprint(merchant)
@@ -395,18 +444,17 @@ class PostgresStore:
                 if unknown_staff_services:
                     raise UnknownServiceError(sorted(unknown_staff_services)[0])
         with self.engine.begin() as connection:
+            merchant_insert = pg_insert(merchants).values(**merchant_values)
+            merchant_update_values = {
+                key: value
+                for key, value in merchant_values.items()
+                if key not in {"id", "schedule_revision", "schedule_fingerprint"}
+            }
             connection.execute(
-                pg_insert(merchants)
-                .values(**merchant_values)
-                .on_conflict_do_update(
+                merchant_insert.on_conflict_do_update(
                     index_elements=[merchants.c.id],
                     set_={
-                        **{
-                            key: value
-                            for key, value in merchant_values.items()
-                            if key
-                            not in {"id", "schedule_revision", "schedule_fingerprint"}
-                        },
+                        **merchant_update_values,
                         "schedule_revision": case(
                             (
                                 merchants.c.schedule_fingerprint.is_distinct_from(
@@ -419,11 +467,29 @@ class PostgresStore:
                         "schedule_fingerprint": schedule_fingerprint,
                         "updated_at": func.now(),
                     },
+                    where=or_(
+                        *[
+                            merchants.c[key].is_distinct_from(
+                                getattr(merchant_insert.excluded, key)
+                            )
+                            for key in merchant_update_values
+                        ],
+                        merchants.c.schedule_fingerprint.is_distinct_from(
+                            merchant_insert.excluded.schedule_fingerprint
+                        ),
+                    ),
                 )
             )
+            services_to_disable = (
+                merchant_services.c.merchant_id == merchant.id
+            ) & merchant_services.c.active.is_(True)
+            if service_ids:
+                services_to_disable = services_to_disable & merchant_services.c.id.not_in(
+                    service_ids
+                )
             connection.execute(
                 merchant_services.update()
-                .where(merchant_services.c.merchant_id == merchant.id)
+                .where(services_to_disable)
                 .values(active=False, updated_at=func.now())
             )
             for display_order, service in enumerate(merchant.services):
@@ -438,6 +504,11 @@ class PostgresStore:
                     "recommended_for": service.recommended_for,
                     "assessment_required_for": service.assessment_required_for,
                     "not_included": service.not_included,
+                    "service_configuration": (
+                        service.service_configuration.model_dump(mode="json")
+                        if service.service_configuration
+                        else None
+                    ),
                     "source": service.source or merchant.source,
                     "active": True,
                     "display_order": display_order,
@@ -452,22 +523,30 @@ class PostgresStore:
                         else 0
                     ),
                 }
+                service_insert = pg_insert(merchant_services).values(**service_values)
+                service_update_values = {
+                    key: value
+                    for key, value in service_values.items()
+                    if key not in {"merchant_id", "id"}
+                }
                 connection.execute(
-                    pg_insert(merchant_services)
-                    .values(**service_values)
-                    .on_conflict_do_update(
+                    service_insert.on_conflict_do_update(
                         index_elements=[
                             merchant_services.c.merchant_id,
                             merchant_services.c.id,
                         ],
                         set_={
-                            **{
-                                key: value
-                                for key, value in service_values.items()
-                                if key not in {"merchant_id", "id"}
-                            },
+                            **service_update_values,
                             "updated_at": func.now(),
                         },
+                        where=or_(
+                            *[
+                                merchant_services.c[key].is_distinct_from(
+                                    getattr(service_insert.excluded, key)
+                                )
+                                for key in service_update_values
+                            ]
+                        ),
                     )
                 )
 

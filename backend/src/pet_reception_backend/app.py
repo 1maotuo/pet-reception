@@ -27,10 +27,13 @@ from .schemas import (
     MerchantBookingList,
     MarkPreparationPresentedRequest,
     PrepareBookingRequest,
+    ServiceQuoteRequest,
+    ServiceQuoteToolResult,
     StartBookingSessionRequest,
     SystemStatus,
     VoiceRequestContext,
 )
+from .service_configuration import ServiceQuoteRejectedError
 from .store import (
     DataStore,
     AvailabilityNeedsInputError,
@@ -263,6 +266,27 @@ def create_app(
             merchant_local_datetime=merchant_now,
             context=context,
         )
+
+    @application.post(
+        "/api/internal/voice/service-quotes",
+        response_model=ServiceQuoteToolResult,
+    )
+    def quote_service(
+        request: ServiceQuoteRequest,
+        context: VoiceRequestContext = Depends(trusted_voice_context),
+        current_store: DataStore = Depends(require_store),
+    ) -> ServiceQuoteToolResult:
+        """Read-only quote from explicit conditions and trusted merchant catalog."""
+        try:
+            quote = current_store.quote_service(context, request)
+        except MerchantNotFoundError as error:
+            raise HTTPException(status_code=404, detail="merchant not found") from error
+        except ServiceQuoteRejectedError as error:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": error.code, "reference": error.reference},
+            ) from error
+        return ServiceQuoteToolResult(quote=quote, context=context)
 
     @application.get(
         "/api/internal/voice/booking-draft",

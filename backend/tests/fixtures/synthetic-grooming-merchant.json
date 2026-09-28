@@ -1,0 +1,199 @@
+{
+  "id": "synthetic-grooming-test-001",
+  "display_name": "Synthetic Grooming Test Merchant",
+  "merchant_type": "grooming",
+  "time_zone": "America/Los_Angeles",
+  "phone": "+1-415-555-0198",
+  "address": "Synthetic test data only",
+  "services": [
+    {
+      "id": "synthetic-dog-bath",
+      "name_zh": "测试犬类洗澡套餐",
+      "duration_minutes": 60,
+      "price_note": "仅用于自动测试的合成价格",
+      "supported_species": ["犬"],
+      "included_items": ["洗澡", "吹干", "剪指甲"],
+      "source": "synthetic-test-catalog:dog-bath",
+      "service_configuration": {
+        "service_kind": "package",
+        "currency": "USD",
+        "included_items": [
+          {"id": "nail-trim", "display_name": "剪指甲"}
+        ],
+        "addons": [
+          {
+            "id": "teeth-brushing",
+            "display_name": "刷牙",
+            "enabled": true,
+            "supported_species": ["犬"],
+            "price": {"semantics": "fixed", "amount_cents": 1200},
+            "duration_minutes": 10,
+            "source": "synthetic-test-addon:teeth-brushing"
+          },
+          {
+            "id": "coat-treatment",
+            "display_name": "毛发特别护理",
+            "enabled": true,
+            "supported_species": ["犬"],
+            "price": {"semantics": "starting_at", "amount_cents": 2000},
+            "duration_minutes": null,
+            "assessment_reason": "毛发特别护理时长需由店员评估",
+            "source": "synthetic-test-addon:coat-treatment"
+          },
+          {
+            "id": "disabled-upgrade",
+            "display_name": "未开放升级",
+            "enabled": false,
+            "supported_species": ["犬"],
+            "price": {"semantics": "fixed", "amount_cents": 500},
+            "duration_minutes": 5,
+            "source": "synthetic-test-addon:disabled"
+          }
+        ],
+        "weight_tiers": [
+          {
+            "id": "dog-under-20lb",
+            "minimum_weight": "0",
+            "maximum_weight": "20",
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": {"semantics": "fixed", "amount_cents": 5000}
+          },
+          {
+            "id": "dog-20-to-40lb",
+            "minimum_weight": "20",
+            "maximum_weight": "40",
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": {"semantics": "fixed", "amount_cents": 6000}
+          },
+          {
+            "id": "dog-40lb-and-up",
+            "minimum_weight": "40",
+            "maximum_weight": null,
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": {
+              "semantics": "starting_at",
+              "amount_cents": 7000,
+              "note": "合成测试起价"
+            }
+          }
+        ],
+        "weight_usage": "price_only",
+        "source": "synthetic-test-pricing:dog-bath"
+      }
+    },
+    {
+      "id": "synthetic-dog-haircut",
+      "name_zh": "测试犬类理发套餐",
+      "duration_minutes": 120,
+      "price_note": "仅用于自动测试的合成价格",
+      "supported_species": ["犬"],
+      "included_items": ["洗澡", "吹干", "理发", "剪指甲"],
+      "source": "synthetic-test-catalog:dog-haircut",
+      "service_configuration": {
+        "service_kind": "package",
+        "currency": "USD",
+        "included_items": [
+          {"id": "nail-trim", "display_name": "剪指甲"}
+        ],
+        "addons": [
+          {
+            "id": "teeth-brushing",
+            "display_name": "刷牙",
+            "enabled": true,
+            "supported_species": ["犬"],
+            "price": {"semantics": "fixed", "amount_cents": 1200},
+            "duration_minutes": 10,
+            "source": "synthetic-test-addon:teeth-brushing"
+          }
+        ],
+        "weight_tiers": [
+          {
+            "id": "haircut-under-20lb",
+            "minimum_weight": "0",
+            "maximum_weight": "20",
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": {"semantics": "fixed", "amount_cents": 9000}
+          },
+          {
+            "id": "haircut-20-to-40lb",
+            "minimum_weight": "20",
+            "maximum_weight": "40",
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": {"semantics": "fixed", "amount_cents": 10500}
+          },
+          {
+            "id": "haircut-40lb-and-up",
+            "minimum_weight": "40",
+            "maximum_weight": null,
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": {"semantics": "starting_at", "amount_cents": 12000}
+          }
+        ],
+        "weight_usage": "price_only",
+        "source": "synthetic-test-pricing:dog-haircut"
+      }
+    },
+    {
+      "id": "synthetic-cat-groom",
+      "name_zh": "测试猫类美容",
+      "duration_minutes": 90,
+      "price_note": "仅用于自动测试的猫类合成价格",
+      "supported_species": ["猫"],
+      "included_items": ["猫类洗护", "剪指甲"],
+      "source": "synthetic-test-catalog:cat-groom",
+      "service_configuration": {
+        "service_kind": "package",
+        "currency": "USD",
+        "included_items": [
+          {"id": "cat-nail-trim", "display_name": "猫咪剪指甲"}
+        ],
+        "addons": [
+          {
+            "id": "cat-deshedding",
+            "display_name": "猫咪去浮毛",
+            "enabled": true,
+            "supported_species": ["猫"],
+            "price": {"semantics": "starting_at", "amount_cents": 1500},
+            "duration_minutes": 15,
+            "source": "synthetic-test-addon:cat-deshedding"
+          }
+        ],
+        "base_price": {
+          "semantics": "range",
+          "amount_cents": 7000,
+          "maximum_amount_cents": 9000
+        },
+        "weight_usage": "not_used",
+        "source": "synthetic-test-pricing:cat-groom"
+      }
+    },
+    {
+      "id": "synthetic-nail-trim",
+      "name_zh": "测试单独剪指甲",
+      "duration_minutes": 15,
+      "price_note": "仅用于自动测试的单项合成价格",
+      "supported_species": ["犬", "猫"],
+      "source": "synthetic-test-catalog:nail-trim",
+      "service_configuration": {
+        "service_kind": "standalone",
+        "currency": "USD",
+        "base_price": {"semantics": "fixed", "amount_cents": 1800},
+        "weight_usage": "not_used",
+        "source": "synthetic-test-pricing:nail-trim"
+      }
+    }
+  ],
+  "source": "synthetic-test-catalog:merchant"
+}

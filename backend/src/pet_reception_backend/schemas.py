@@ -25,7 +25,170 @@ class SystemStatus(BaseModel):
     database: DatabaseStatus
 
 
+class StructuredPrice(BaseModel):
+    """One configured monetary fact, always expressed in integer minor units."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    semantics: Literal["fixed", "starting_at", "range", "assessment_required"]
+    amount_cents: int | None = Field(default=None, ge=0)
+    maximum_amount_cents: int | None = Field(default=None, ge=0)
+    note: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def require_amounts_matching_semantics(self) -> "StructuredPrice":
+        if self.semantics in {"fixed", "starting_at"}:
+            if self.amount_cents is None or self.maximum_amount_cents is not None:
+                raise ValueError(
+                    f"{self.semantics} price requires amount_cents only"
+                )
+        elif self.semantics == "range":
+            if (
+                self.amount_cents is None
+                or self.maximum_amount_cents is None
+                or self.maximum_amount_cents <= self.amount_cents
+            ):
+                raise ValueError(
+                    "range price requires maximum_amount_cents greater than amount_cents"
+                )
+        elif self.amount_cents is not None or self.maximum_amount_cents is not None:
+            raise ValueError("assessment_required price cannot contain an amount")
+        return self
+
+
+class ServiceItemConfiguration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=128)
+    display_name: str = Field(min_length=1, max_length=200)
+
+
+class ServiceAddonConfiguration(ServiceItemConfiguration):
+    enabled: bool = True
+    supported_species: list[str] = Field(default_factory=list)
+    price: StructuredPrice | None = None
+    duration_minutes: int | None = Field(default=None, gt=0, le=1440)
+    requires_assessment: bool = False
+    assessment_reason: str | None = Field(default=None, max_length=500)
+    source: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def require_assessment_reason(self) -> "ServiceAddonConfiguration":
+        if self.requires_assessment and not self.assessment_reason:
+            raise ValueError("assessment_reason is required when assessment is required")
+        return self
+
+
+class WeightTierConfiguration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=128)
+    minimum_weight: Decimal = Field(ge=0)
+    maximum_weight: Decimal | None = Field(default=None, gt=0)
+    unit: Literal["lb", "kg"]
+    minimum_inclusive: bool
+    maximum_inclusive: bool
+    price: StructuredPrice
+    duration_minutes: int | None = Field(default=None, gt=0, le=1440)
+    eligible: bool = True
+    assessment_reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def require_valid_interval(self) -> "WeightTierConfiguration":
+        if self.maximum_weight is not None and self.minimum_weight >= self.maximum_weight:
+            raise ValueError("weight tier minimum must be below maximum")
+        if self.maximum_weight is None and self.maximum_inclusive:
+            raise ValueError("an unbounded maximum cannot be inclusive")
+        if not self.eligible and not self.assessment_reason:
+            raise ValueError("ineligible weight tiers require assessment_reason")
+        return self
+
+
+class ServiceConfiguration(BaseModel):
+    """Optional structured rules for one merchant service.
+
+    The legacy service duration and price note remain authoritative when this
+    configuration is absent. This object is deliberately small rather than a
+    generic pricing/rules language.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    service_kind: Literal["package", "standalone"]
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    included_items: list[ServiceItemConfiguration] = Field(default_factory=list)
+    addons: list[ServiceAddonConfiguration] = Field(default_factory=list)
+    base_price: StructuredPrice | None = None
+    weight_tiers: list[WeightTierConfiguration] = Field(default_factory=list)
+    weight_usage: Literal[
+        "not_used",
+        "price_only",
+        "price_and_duration",
+        "eligibility",
+    ] = "not_used"
+    source: str = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def require_consistent_rules(self) -> "ServiceConfiguration":
+        included_ids = [item.id for item in self.included_items]
+        addon_ids = [item.id for item in self.addons]
+        if len(set(included_ids)) != len(included_ids):
+            raise ValueError("included item ids must be unique")
+        if len(set(addon_ids)) != len(addon_ids):
+            raise ValueError("addon ids must be unique within a service")
+        overlap = set(included_ids).intersection(addon_ids)
+        if overlap:
+            raise ValueError(
+                f"included items cannot also be configured as add-ons: {sorted(overlap)}"
+            )
+        if self.base_price is not None and self.weight_tiers:
+            raise ValueError("base_price and weight_tiers are mutually exclusive")
+        if self.weight_tiers and self.weight_usage == "not_used":
+            raise ValueError("weight_usage must describe configured weight tiers")
+        if not self.weight_tiers and self.weight_usage != "not_used":
+            raise ValueError("weight_usage requires weight_tiers")
+        if self.weight_usage == "price_and_duration" and any(
+            tier.duration_minutes is None for tier in self.weight_tiers
+        ):
+            raise ValueError(
+                "price_and_duration tiers must all configure duration_minutes"
+            )
+        self._validate_weight_tier_partition()
+        return self
+
+    def _validate_weight_tier_partition(self) -> None:
+        if not self.weight_tiers:
+            return
+        pounds_to_kg = Decimal("0.45359237")
+
+        def in_kg(value: Decimal | None, unit: str) -> Decimal | None:
+            if value is None:
+                return None
+            return value if unit == "kg" else value * pounds_to_kg
+
+        ordered = sorted(
+            self.weight_tiers,
+            key=lambda tier: in_kg(tier.minimum_weight, tier.unit) or Decimal(0),
+        )
+        first_minimum = in_kg(ordered[0].minimum_weight, ordered[0].unit)
+        if first_minimum != 0 or not ordered[0].minimum_inclusive:
+            raise ValueError("weight tiers must start at an inclusive zero boundary")
+        for previous, current in zip(ordered, ordered[1:]):
+            previous_maximum = in_kg(previous.maximum_weight, previous.unit)
+            current_minimum = in_kg(current.minimum_weight, current.unit)
+            if previous_maximum is None or previous_maximum != current_minimum:
+                raise ValueError("weight tiers must be contiguous and non-overlapping")
+            if previous.maximum_inclusive == current.minimum_inclusive:
+                raise ValueError(
+                    "exactly one adjacent tier must include the shared boundary"
+                )
+        if ordered[-1].maximum_weight is not None:
+            raise ValueError("weight tiers must include one unbounded final tier")
+
+
 class MerchantService(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     name_zh: str
     duration_minutes: int = Field(gt=0, le=1440)
@@ -36,6 +199,93 @@ class MerchantService(BaseModel):
     assessment_required_for: list[str] = Field(default_factory=list)
     not_included: list[str] = Field(default_factory=list)
     source: str | None = None
+    # Internal catalog fact. Callers receive only the calculated quote, never
+    # the raw rule set through the existing merchant-info/model tool.
+    service_configuration: ServiceConfiguration | None = Field(default=None, exclude=True)
+
+
+class QuoteWeightInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: Decimal | None = Field(default=None, gt=0)
+    minimum: Decimal | None = Field(default=None, gt=0)
+    maximum: Decimal | None = Field(default=None, gt=0)
+    unit: Literal["lb", "kg"]
+    estimated: bool = False
+
+    @model_validator(mode="after")
+    def require_point_or_range(self) -> "QuoteWeightInput":
+        has_value = self.value is not None
+        has_range = self.minimum is not None or self.maximum is not None
+        if has_value == has_range:
+            raise ValueError("provide either value or minimum/maximum weight")
+        if has_range:
+            if self.minimum is None or self.maximum is None:
+                raise ValueError("weight range requires both minimum and maximum")
+            if self.minimum > self.maximum:
+                raise ValueError("weight minimum cannot exceed maximum")
+        return self
+
+
+class ServiceQuoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_id: str = Field(min_length=1, max_length=128)
+    pet_species: str | None = Field(default=None, min_length=1, max_length=80)
+    weight: QuoteWeightInput | None = None
+    selected_addon_ids: list[str] = Field(default_factory=list, max_length=32)
+
+
+class QuoteLineItem(BaseModel):
+    item_id: str
+    display_name: str
+    kind: Literal["base_service", "addon", "included_selection"]
+    pricing_semantics: Literal[
+        "fixed",
+        "starting_at",
+        "range",
+        "assessment_required",
+        "unconfigured",
+    ]
+    amount_min_cents: int | None = None
+    amount_max_cents: int | None = None
+    duration_minutes: int | None = None
+    note: str | None = None
+
+
+class ServiceQuoteResult(BaseModel):
+    merchant_id: str
+    service_id: str
+    service_name: str
+    service_kind: Literal["package", "standalone"] | None
+    applicable_species: list[str]
+    requested_species: str | None
+    weight: QuoteWeightInput | None
+    matched_weight_tier_id: str | None
+    included_items: list[ServiceItemConfiguration]
+    selected_addon_ids: list[str]
+    duplicate_addon_ids: list[str]
+    line_items: list[QuoteLineItem]
+    currency: str | None
+    total_semantics: Literal[
+        "fixed",
+        "starting_at",
+        "range",
+        "assessment_required",
+        "unconfigured",
+    ]
+    total_min_cents: int | None
+    total_max_cents: int | None
+    legacy_price_note: str
+    scheduling_duration_minutes: int | None
+    missing_for_quote: list[str]
+    missing_for_availability: list[str]
+    missing_for_booking: list[str]
+    requires_assessment: bool
+    assessment_reasons: list[str]
+    can_quote: bool
+    can_schedule: bool
+    source: str | None
 
 
 class GroomingPolicy(BaseModel):
@@ -198,6 +448,11 @@ class VoiceRequestContext(BaseModel):
     voice_session_id: str
     turn_id: str
     source: Literal["trusted_gateway_headers"] = "trusted_gateway_headers"
+
+
+class ServiceQuoteToolResult(BaseModel):
+    quote: ServiceQuoteResult
+    context: VoiceRequestContext
 
 
 class MerchantToolResult(BaseModel):

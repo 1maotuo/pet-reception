@@ -8,6 +8,7 @@ from pet_reception_backend.app import create_app
 from pet_reception_backend.config import Settings
 from pet_reception_backend.merchant_catalog import load_demo_merchant
 from pet_reception_backend.schemas import DatabaseStatus, DemoMerchant
+from pet_reception_backend.service_configuration import calculate_service_quote
 
 
 class StubProbe:
@@ -28,6 +29,12 @@ class StubStore:
 
     def get_merchant(self, merchant_id: str) -> DemoMerchant | None:
         return self.merchant if merchant_id == self.merchant.id else None
+
+    def quote_service(self, context, request):
+        merchant = self.get_merchant(context.merchant_id)
+        if merchant is None:
+            raise LookupError(context.merchant_id)
+        return calculate_service_quote(merchant, request)
 
     def get_or_create_draft(self, _context):
         raise NotImplementedError
@@ -177,6 +184,42 @@ def test_voice_tool_rejects_a_different_merchant_binding() -> None:
         )
 
     assert response.status_code == 403
+
+
+def test_read_only_quote_uses_trusted_merchant_and_rejects_derived_facts() -> None:
+    probe = StubProbe(DatabaseStatus(status="connected", detail="ok"))
+    trusted_headers = {
+        "Authorization": "Bearer test-service-token",
+        "X-Voice-Owner-ID": "user_signed-owner",
+        "X-Voice-Session-ID": "session-quote",
+        "X-Voice-Turn-ID": "turn-quote",
+        "X-Merchant-ID": "demo-grooming-001",
+    }
+    with TestClient(create_app(settings(), probe, default_store())) as client:
+        response = client.post(
+            "/api/internal/voice/service-quotes",
+            headers=trusted_headers,
+            json={"service_id": "demo-bath"},
+        )
+        forged = client.post(
+            "/api/internal/voice/service-quotes",
+            headers=trusted_headers,
+            json={
+                "service_id": "demo-bath",
+                "merchant_id": "other-merchant",
+                "total_min_cents": 1,
+                "scheduling_duration_minutes": 1,
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["quote"]["merchant_id"] == "demo-grooming-001"
+    assert body["quote"]["total_semantics"] == "unconfigured"
+    assert body["quote"]["total_min_cents"] is None
+    assert body["quote"]["legacy_price_note"].startswith("演示价格")
+    assert body["context"]["voice_session_id"] == "session-quote"
+    assert forged.status_code == 422
 
 
 def test_voice_tool_uses_a_store_matching_the_configured_merchant(tmp_path: Path) -> None:
