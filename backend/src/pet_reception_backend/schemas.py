@@ -412,6 +412,7 @@ class DemoMerchant(BaseModel):
     grooming_policy: GroomingPolicy | None = None
     business_hours: MerchantBusinessHours | None = None
     is_demo: Literal[True] = True
+    demo_profile: Literal["legacy", "grooming_combination_pricing"] = "legacy"
     source: str
 
     @field_validator("time_zone")
@@ -488,6 +489,111 @@ class MerchantSchedulingSeed(BaseModel):
 
 class DemoMerchantConfig(DemoMerchant):
     scheduling: MerchantSchedulingSeed | None = None
+
+    @model_validator(mode="after")
+    def require_complete_combination_pricing_demo(self) -> "DemoMerchantConfig":
+        if self.demo_profile != "grooming_combination_pricing":
+            return self
+
+        if self.grooming_policy is None:
+            raise ValueError("combination pricing demo requires grooming_policy")
+        if self.business_hours is None:
+            raise ValueError("combination pricing demo requires business_hours")
+        if self.scheduling is None:
+            raise ValueError("combination pricing demo requires scheduling")
+
+        service_ids = {service.id for service in self.services}
+        dog_packages = []
+        cat_packages = []
+        standalone_species: set[str] = set()
+        configured_species: set[str] = set()
+
+        for service in self.services:
+            configuration = service.service_configuration
+            if configuration is None:
+                raise ValueError(
+                    f"combination pricing demo service {service.id} requires service_configuration"
+                )
+            if configuration.deposit is None:
+                raise ValueError(
+                    f"combination pricing demo service {service.id} requires deposit_configuration"
+                )
+            if configuration.base_price is None and not configuration.weight_tiers:
+                raise ValueError(
+                    f"combination pricing demo service {service.id} requires pricing configuration"
+                )
+            for addon in configuration.addons:
+                if addon.enabled and addon.price is None:
+                    raise ValueError(
+                        f"combination pricing demo add-on {addon.id} requires price configuration"
+                    )
+                if addon.enabled and addon.duration_minutes is None:
+                    raise ValueError(
+                        f"combination pricing demo add-on {addon.id} requires duration configuration"
+                    )
+
+            species = set(service.supported_species)
+            configured_species.update(species)
+            if configuration.service_kind == "package" and "犬" in species:
+                dog_packages.append(service)
+            if configuration.service_kind == "package" and "猫" in species:
+                cat_packages.append(service)
+            if configuration.service_kind == "standalone":
+                standalone_species.update(species)
+
+        if len(dog_packages) < 2 or not any(
+            service.service_configuration
+            and service.service_configuration.weight_tiers
+            for service in dog_packages
+        ):
+            raise ValueError(
+                "combination pricing demo requires two dog packages and weight-tier pricing"
+            )
+        if not cat_packages:
+            raise ValueError("combination pricing demo requires an independent cat package")
+        if not {"犬", "猫"}.issubset(standalone_species):
+            raise ValueError(
+                "combination pricing demo requires a dog/cat standalone service"
+            )
+
+        policy_species = set(self.grooming_policy.supported_species)
+        if not configured_species.issubset(policy_species):
+            raise ValueError(
+                "grooming_policy.supported_species must cover every configured service"
+            )
+
+        buffer_ids = {item.service_id for item in self.scheduling.service_buffers}
+        if buffer_ids != service_ids:
+            raise ValueError(
+                "combination pricing demo requires one scheduling buffer per service"
+            )
+        qualified_service_ids: set[str] = set()
+        for staff in self.scheduling.staff:
+            unknown = set(staff.service_ids) - service_ids
+            if unknown:
+                raise ValueError(
+                    f"staff {staff.id} references unknown services: {sorted(unknown)}"
+                )
+            qualified_service_ids.update(staff.service_ids)
+        if qualified_service_ids != service_ids:
+            raise ValueError(
+                "combination pricing demo requires qualified staff for every service"
+            )
+
+        business_hours: dict[int, list[PublicBusinessHoursWindow]] = {}
+        for window in self.business_hours.weekly_hours:
+            business_hours.setdefault(window.weekday, []).append(window)
+        for staff in self.scheduling.staff:
+            for window in staff.weekly_hours:
+                if not any(
+                    opening.opens_at <= window.start_time
+                    and window.end_time <= opening.closes_at
+                    for opening in business_hours.get(window.weekday, [])
+                ):
+                    raise ValueError(
+                        f"staff {staff.id} working hours must stay within business hours"
+                    )
+        return self
 
 
 class VoiceRequestContext(BaseModel):

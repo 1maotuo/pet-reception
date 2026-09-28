@@ -7,6 +7,7 @@ import pytest
 from pet_reception_backend.merchant_catalog import load_demo_merchant
 from pet_reception_backend.schemas import (
     DemoMerchant,
+    DemoMerchantConfig,
     MerchantService,
     ServiceConfiguration,
     ServiceQuoteRequest,
@@ -18,6 +19,9 @@ from pet_reception_backend.service_configuration import (
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "synthetic-grooming-merchant.json"
+COMBINATION_DEMO = (
+    Path(__file__).parents[2] / "config" / "demo-grooming-combination-merchant.json"
+)
 
 
 @pytest.fixture(scope="module")
@@ -27,6 +31,81 @@ def merchant():
 
 def quote(merchant, **values):
     return calculate_service_quote(merchant, ServiceQuoteRequest(**values))
+
+
+def test_runtime_combination_demo_is_complete_and_independent_from_test_fixture() -> None:
+    configured = load_demo_merchant(COMBINATION_DEMO)
+
+    assert configured.id == "demo-grooming-combo-001"
+    assert configured.demo_profile == "grooming_combination_pricing"
+    assert {species for service in configured.services for species in service.supported_species} == {
+        "犬",
+        "猫",
+    }
+    assert all(service.service_configuration for service in configured.services)
+    assert all(
+        service.service_configuration and service.service_configuration.deposit
+        for service in configured.services
+    )
+    assert {staff.display_name for staff in configured.scheduling.staff} == {"Lisa", "Mia"}
+
+    light_bath = quote(
+        configured,
+        service_id="combo-dog-bath",
+        pet_species="犬",
+        weight={"value": "15", "unit": "lb"},
+    )
+    medium_bath = quote(
+        configured,
+        service_id="combo-dog-bath",
+        pet_species="犬",
+        weight={"value": "35", "unit": "lb"},
+    )
+    medium_haircut = quote(
+        configured,
+        service_id="combo-dog-haircut",
+        pet_species="犬",
+        weight={"value": "35", "unit": "lb"},
+        selected_addon_ids=["nail-trim", "nail-trim", "teeth-brushing"],
+    )
+    cat = quote(
+        configured,
+        service_id="combo-cat-groom",
+        pet_species="猫",
+    )
+
+    assert light_bath.total_min_cents == 5000
+    assert medium_bath.total_min_cents == 6000
+    assert medium_haircut.total_min_cents == 11700
+    assert medium_haircut.scheduling_duration_minutes == 130
+    assert medium_haircut.deposit_amount_cents == 3000
+    included = next(
+        item for item in medium_haircut.line_items if item.item_id == "nail-trim"
+    )
+    assert included.amount_min_cents == 0
+    assert included.duration_minutes == 0
+    assert medium_haircut.duplicate_addon_ids == ["nail-trim"]
+    assert cat.total_semantics == "range"
+    assert (cat.total_min_cents, cat.total_max_cents) == (7000, 9000)
+
+
+def test_runtime_combination_demo_rejects_missing_pricing_and_staff_coverage() -> None:
+    raw = json.loads(COMBINATION_DEMO.read_text(encoding="utf-8"))
+    raw["services"][0]["service_configuration"].pop("deposit")
+    with pytest.raises(ValidationError, match="deposit_configuration"):
+        DemoMerchantConfig.model_validate(raw)
+
+    raw = json.loads(COMBINATION_DEMO.read_text(encoding="utf-8"))
+    raw["scheduling"]["staff"][1]["service_ids"] = [
+        "combo-standalone-nail-trim"
+    ]
+    with pytest.raises(ValidationError, match="qualified staff for every service"):
+        DemoMerchantConfig.model_validate(raw)
+
+    raw = json.loads(COMBINATION_DEMO.read_text(encoding="utf-8"))
+    raw["scheduling"]["staff"][0]["weekly_hours"][0]["end_time"] = "18:00"
+    with pytest.raises(ValidationError, match="within business hours"):
+        DemoMerchantConfig.model_validate(raw)
 
 
 def test_quote_is_deterministic_and_deduplicates_included_and_paid_items(

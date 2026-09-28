@@ -48,6 +48,7 @@ def settings() -> Settings:
         database_url="",
         voice_gateway_service_token="test-service-token",
         demo_merchant_id="demo-grooming-001",
+        merchant_config_path="config/demo-merchant.json",
     )
 
 

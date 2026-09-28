@@ -1,0 +1,326 @@
+{
+  "id": "demo-grooming-combo-001",
+  "display_name": "Paws & Whiskers 犬猫美容组合计价演示店",
+  "merchant_type": "grooming",
+  "demo_profile": "grooming_combination_pricing",
+  "time_zone": "America/Los_Angeles",
+  "phone": "+1-415-555-0166",
+  "address": "166 Demo Avenue, San Francisco, CA",
+  "business_hours": {
+    "weekly_hours": [
+      { "weekday": 0, "opens_at": "09:00", "closes_at": "17:00" },
+      { "weekday": 1, "opens_at": "09:00", "closes_at": "17:00" },
+      { "weekday": 2, "opens_at": "09:00", "closes_at": "17:00" },
+      { "weekday": 3, "opens_at": "09:00", "closes_at": "17:00" },
+      { "weekday": 4, "opens_at": "09:00", "closes_at": "17:00" },
+      { "weekday": 5, "opens_at": "09:00", "closes_at": "17:00" }
+    ],
+    "closed_weekdays": [6],
+    "note": "演示营业时间为周一至周六上午9点至下午5点；实际候选仍以实时演示排班为准。",
+    "source": "demo-only-combination-hours:demo-grooming-combo-001"
+  },
+  "services": [
+    {
+      "id": "combo-dog-bath",
+      "name_zh": "犬类洗澡套餐（演示）",
+      "duration_minutes": 60,
+      "price_note": "演示分档价格；仅用于本地组合计价验收",
+      "supported_species": ["犬"],
+      "included_items": ["洗澡", "吹干", "基础梳理", "耳部外观清洁", "剪指甲"],
+      "recommended_for": ["犬类日常清洁且不需要剪毛造型"],
+      "assessment_required_for": ["皮肤异常、伤口、明显不适或强烈攻击风险"],
+      "not_included": ["剪毛造型", "医疗诊断或治疗"],
+      "source": "demo-only-combination-catalog:dog-bath",
+      "service_configuration": {
+        "service_kind": "package",
+        "currency": "USD",
+        "included_items": [
+          { "id": "nail-trim", "display_name": "剪指甲" }
+        ],
+        "addons": [
+          {
+            "id": "teeth-brushing",
+            "display_name": "刷牙",
+            "enabled": true,
+            "supported_species": ["犬"],
+            "price": { "semantics": "fixed", "amount_cents": 1200 },
+            "duration_minutes": 10,
+            "source": "demo-only-combination-addon:teeth-brushing"
+          },
+          {
+            "id": "dog-deshedding",
+            "display_name": "犬类去浮毛",
+            "enabled": true,
+            "supported_species": ["犬"],
+            "price": { "semantics": "fixed", "amount_cents": 2000 },
+            "duration_minutes": 20,
+            "source": "demo-only-combination-addon:dog-deshedding"
+          }
+        ],
+        "weight_tiers": [
+          {
+            "id": "dog-bath-under-20lb",
+            "minimum_weight": "0",
+            "maximum_weight": "20",
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": { "semantics": "fixed", "amount_cents": 5000 }
+          },
+          {
+            "id": "dog-bath-20-to-40lb",
+            "minimum_weight": "20",
+            "maximum_weight": "40",
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": { "semantics": "fixed", "amount_cents": 6000 }
+          },
+          {
+            "id": "dog-bath-40lb-and-up",
+            "minimum_weight": "40",
+            "maximum_weight": null,
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": {
+              "semantics": "starting_at",
+              "amount_cents": 7000,
+              "note": "演示起价；仅用于本地验收"
+            }
+          }
+        ],
+        "weight_usage": "price_only",
+        "deposit": {
+          "amount_cents": 2000,
+          "application": "applied_to_service_total",
+          "note": "演示预约金20美元，可抵扣本次演示服务总额"
+        },
+        "source": "demo-only-combination-pricing:dog-bath"
+      }
+    },
+    {
+      "id": "combo-dog-haircut",
+      "name_zh": "犬类理发套餐（演示）",
+      "duration_minutes": 120,
+      "price_note": "演示分档价格；仅用于本地组合计价验收",
+      "supported_species": ["犬"],
+      "included_items": ["洗澡", "吹干", "全身梳理", "修剪造型", "剪指甲"],
+      "recommended_for": ["需要犬类剪毛或造型"],
+      "assessment_required_for": ["严重打结、特殊造型、皮肤异常或强烈攻击风险"],
+      "not_included": ["医疗诊断或治疗"],
+      "source": "demo-only-combination-catalog:dog-haircut",
+      "service_configuration": {
+        "service_kind": "package",
+        "currency": "USD",
+        "included_items": [
+          { "id": "nail-trim", "display_name": "剪指甲" }
+        ],
+        "addons": [
+          {
+            "id": "teeth-brushing",
+            "display_name": "刷牙",
+            "enabled": true,
+            "supported_species": ["犬"],
+            "price": { "semantics": "fixed", "amount_cents": 1200 },
+            "duration_minutes": 10,
+            "source": "demo-only-combination-addon:teeth-brushing"
+          },
+          {
+            "id": "dog-deshedding",
+            "display_name": "犬类去浮毛",
+            "enabled": true,
+            "supported_species": ["犬"],
+            "price": { "semantics": "fixed", "amount_cents": 2000 },
+            "duration_minutes": 20,
+            "source": "demo-only-combination-addon:dog-deshedding"
+          }
+        ],
+        "weight_tiers": [
+          {
+            "id": "dog-haircut-under-20lb",
+            "minimum_weight": "0",
+            "maximum_weight": "20",
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": { "semantics": "fixed", "amount_cents": 9000 }
+          },
+          {
+            "id": "dog-haircut-20-to-40lb",
+            "minimum_weight": "20",
+            "maximum_weight": "40",
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": { "semantics": "fixed", "amount_cents": 10500 }
+          },
+          {
+            "id": "dog-haircut-40lb-and-up",
+            "minimum_weight": "40",
+            "maximum_weight": null,
+            "unit": "lb",
+            "minimum_inclusive": true,
+            "maximum_inclusive": false,
+            "price": {
+              "semantics": "starting_at",
+              "amount_cents": 12000,
+              "note": "演示起价；仅用于本地验收"
+            }
+          }
+        ],
+        "weight_usage": "price_only",
+        "deposit": {
+          "amount_cents": 3000,
+          "application": "applied_to_service_total",
+          "note": "演示预约金30美元，可抵扣本次演示服务总额"
+        },
+        "source": "demo-only-combination-pricing:dog-haircut"
+      }
+    },
+    {
+      "id": "combo-cat-groom",
+      "name_zh": "猫类美容套餐（演示）",
+      "duration_minutes": 90,
+      "price_note": "演示猫类独立价格范围；不套用犬类价格表",
+      "supported_species": ["猫"],
+      "included_items": ["猫类洗护", "吹干", "基础梳理", "猫咪剪指甲"],
+      "recommended_for": ["能够安全接受非医疗美容的猫咪"],
+      "assessment_required_for": ["强烈应激、攻击风险、严重打结、皮肤异常或明显不适"],
+      "not_included": ["犬类剪毛造型", "医疗诊断或治疗"],
+      "source": "demo-only-combination-catalog:cat-groom",
+      "service_configuration": {
+        "service_kind": "package",
+        "currency": "USD",
+        "included_items": [
+          { "id": "cat-nail-trim", "display_name": "猫咪剪指甲" }
+        ],
+        "addons": [
+          {
+            "id": "cat-deshedding",
+            "display_name": "猫咪去浮毛",
+            "enabled": true,
+            "supported_species": ["猫"],
+            "price": {
+              "semantics": "starting_at",
+              "amount_cents": 1500,
+              "note": "演示起价；仅用于本地验收"
+            },
+            "duration_minutes": 15,
+            "source": "demo-only-combination-addon:cat-deshedding"
+          }
+        ],
+        "base_price": {
+          "semantics": "range",
+          "amount_cents": 7000,
+          "maximum_amount_cents": 9000,
+          "note": "演示范围；现场仍需确认宠物状态"
+        },
+        "weight_usage": "not_used",
+        "deposit": {
+          "amount_cents": 2500,
+          "application": "application_unconfirmed",
+          "note": "演示预约金25美元；是否抵扣尾款的规则尚未确认"
+        },
+        "source": "demo-only-combination-pricing:cat-groom"
+      }
+    },
+    {
+      "id": "combo-standalone-nail-trim",
+      "name_zh": "单独剪指甲（演示）",
+      "duration_minutes": 15,
+      "price_note": "演示单项固定价格",
+      "supported_species": ["犬", "猫"],
+      "included_items": ["单独剪指甲"],
+      "recommended_for": ["只需要单独修剪指甲的犬或猫"],
+      "assessment_required_for": ["强烈应激或攻击风险"],
+      "not_included": ["洗澡", "吹干", "剪毛造型", "医疗处理"],
+      "source": "demo-only-combination-catalog:standalone-nail-trim",
+      "service_configuration": {
+        "service_kind": "standalone",
+        "currency": "USD",
+        "base_price": { "semantics": "fixed", "amount_cents": 1800 },
+        "weight_usage": "not_used",
+        "deposit": {
+          "amount_cents": 500,
+          "application": "applied_to_service_total",
+          "note": "演示预约金5美元，可抵扣本次演示服务总额"
+        },
+        "source": "demo-only-combination-pricing:standalone-nail-trim"
+      }
+    }
+  ],
+  "grooming_policy": {
+    "supported_species": ["犬", "猫"],
+    "unsupported_species": ["爬行动物", "鸟类", "其他未列明宠物"],
+    "staff_assessment_required_for": ["严重打结", "皮肤异常、伤口或明显不适", "强烈应激或攻击风险"],
+    "recommendation_boundary": "只能依据本演示目录的适用物种、包含项目、附加项目和评估条件提供建议；未配置内容必须说明未知。",
+    "medical_boundary": "本演示店只提供非医疗美容；宠物不适、伤口或疑似疾病应先联系合格兽医。",
+    "minimum_age_note": "幼宠是否适合服务需要由演示店员评估。",
+    "vaccination_note": "疫苗要求由演示店员最终确认。",
+    "arrival_note": "请按预约时间到店，并如实说明宠物健康、应激和攻击风险。",
+    "late_arrival_note": "迟到是否仍可服务由演示店员结合当天排班确认。",
+    "aggression_policy": "强烈应激或攻击风险必须先人工评估，语音前台不能承诺接待。",
+    "price_confirmation_policy": "所有金额均为本地演示数据，不是任何真实网站或门店的正式价格。"
+  },
+  "source": "demo-only-combination-catalog:demo-grooming-combo-001",
+  "scheduling": {
+    "slot_interval_minutes": 30,
+    "candidate_limit": 8,
+    "alternative_days": 7,
+    "service_buffers": [
+      { "service_id": "combo-dog-bath", "buffer_before_minutes": 0, "buffer_after_minutes": 0 },
+      { "service_id": "combo-dog-haircut", "buffer_before_minutes": 0, "buffer_after_minutes": 0 },
+      { "service_id": "combo-cat-groom", "buffer_before_minutes": 0, "buffer_after_minutes": 0 },
+      { "service_id": "combo-standalone-nail-trim", "buffer_before_minutes": 0, "buffer_after_minutes": 0 }
+    ],
+    "staff": [
+      {
+        "id": "combo-staff-lisa",
+        "display_name": "Lisa",
+        "service_ids": ["combo-dog-bath", "combo-dog-haircut", "combo-standalone-nail-trim"],
+        "public_intro": "Lisa 是犬类美容师，可提供犬类洗澡、犬类理发和单独剪指甲演示服务。",
+        "specialties": ["犬类洗澡", "犬类修剪造型"],
+        "weekly_hours": [
+          { "weekday": 0, "start_time": "09:00", "end_time": "17:00" },
+          { "weekday": 1, "start_time": "09:00", "end_time": "17:00" },
+          { "weekday": 2, "start_time": "09:00", "end_time": "17:00" },
+          { "weekday": 3, "start_time": "09:00", "end_time": "17:00" },
+          { "weekday": 4, "start_time": "09:00", "end_time": "17:00" },
+          { "weekday": 5, "start_time": "09:00", "end_time": "17:00" }
+        ],
+        "source": "demo-only-combination-schedule:staff-lisa"
+      },
+      {
+        "id": "combo-staff-mia",
+        "display_name": "Mia",
+        "service_ids": ["combo-cat-groom", "combo-standalone-nail-trim"],
+        "public_intro": "Mia 是猫类美容师，可提供猫类美容和单独剪指甲演示服务。",
+        "specialties": ["猫类非医疗美容", "犬猫单独剪指甲"],
+        "weekly_hours": [
+          { "weekday": 0, "start_time": "09:00", "end_time": "17:00" },
+          { "weekday": 1, "start_time": "09:00", "end_time": "17:00" },
+          { "weekday": 2, "start_time": "09:00", "end_time": "17:00" },
+          { "weekday": 3, "start_time": "09:00", "end_time": "17:00" },
+          { "weekday": 4, "start_time": "09:00", "end_time": "17:00" },
+          { "weekday": 5, "start_time": "09:00", "end_time": "17:00" }
+        ],
+        "source": "demo-only-combination-schedule:staff-mia"
+      }
+    ]
+  },
+  "front_desk": {
+    "role_label": "犬猫美容组合计价演示预约前台",
+    "conversation_focus": "围绕本演示店的犬猫美容套餐、体重分档报价、包含项目、收费附加项、实时演示排班、受控预约确认和本地模拟预约金展开。",
+    "opening_greeting": "您好，这里是 Paws & Whiskers 犬猫美容组合计价演示店预约前台。我们提供犬类洗澡、犬类理发、猫类美容和单独剪指甲演示服务，请问想先询价还是安排时间？",
+    "off_topic_redirect": "简短回应必要内容后，自然说明这里只处理本演示店的犬猫美容咨询与预约。",
+    "pet_health_guidance": "宠物不舒服时不诊断，建议先联系合格兽医；本演示店只提供非医疗美容服务。",
+    "human_health_guidance": "来电人身体不舒服时不诊断，建议联系合格医疗专业人员，再简短带回本店服务范围。",
+    "capabilities": {
+      "merchant_public_info": true,
+      "availability_lookup": true,
+      "booking_write": true,
+      "booking_confirmation": true
+    }
+  }
+}

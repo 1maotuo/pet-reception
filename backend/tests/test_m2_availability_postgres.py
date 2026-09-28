@@ -42,13 +42,14 @@ def environment():
     base_settings = Settings()
     database_url = base_settings.resolved_test_database_url()
     ensure_test_database(database_url)
-    setup_database(database_url, base_settings.merchant_config_path)
+    legacy_config_path = "config/demo-merchant.json"
+    setup_database(database_url, legacy_config_path)
     configured = Settings(
         database_url=database_url,
         test_database_url=database_url,
         voice_gateway_service_token="m2-test-service-token",
         demo_merchant_id="demo-grooming-001",
-        merchant_config_path=base_settings.merchant_config_path,
+        merchant_config_path=legacy_config_path,
     )
     probe = DatabaseProbe(database_url)
     store = PostgresStore(probe.get_engine())
