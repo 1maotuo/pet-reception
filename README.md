@@ -271,3 +271,7 @@ VOICE_AUDIO_INPUT_LABEL=USB Audio Device
 Qwen Gateway 使用签名的 HttpOnly 身份 Cookie。模型不能提交授权用的 `merchant_id`、`owner_id`、`session_id`、`turn_id`、呈现事件或确认事件。薄协调器从 Gateway 服务端上下文读取身份，以服务令牌调用 FastAPI；FastAPI 同时验证令牌和固定商家绑定。客户访问 token 与凭证 URL 不进入模型工具结果，只通过绑定到原 WebSocket 的页面卡片交付。摘要由服务端快照生成并走原版播放队列，只有播放、响应和转写都完成，且转写与服务端快照中的身份、服务、员工、护理事项、日期、时间和实际电话号码一致时才记录 `presented`；三类事件的到达顺序不影响最终一次上报，取消/打断播放不会被晚到事件重新放行。
 
 上游版本与扩展边界见 `docs/upstream/QWEN_AUDIO_AGENT.md`，M4 Review 修复、测试结果和仍未执行的真人项见 `docs/evidence/M4_REVIEW_REMEDIATION_2026-09-20.md`。
+
+## License
+
+本项目采用 [MIT License](LICENSE)。`qwen-audio-agent` 等第三方依赖继续遵循各自许可证。
